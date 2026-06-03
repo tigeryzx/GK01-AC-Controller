@@ -27,7 +27,7 @@
 | 指示灯 | 蓝色 GPIO4/D2, 红色 GPIO12/D6, 黄色 GPIO13/D7 |
 | 按键 | GPIO13/D7（复用黄色 LED 引脚） |
 | 供电 | Micro USB（仅供电）或焊盘 VCC/GND |
-| 刷写接口 | 焊盘 TX/RX/GND/D3，需 USB-TTL 转换器 |
+| 刷写接口 | 焊盘 TX/RX/GND/IO0，需 USB-TTL 转换器 |
 
 ## 快速开始
 
@@ -52,7 +52,7 @@ pio run -e nodemcuv2
 | RX | TX |
 | GND | GND |
 
-**进入刷写模式**：短接 D3 焊盘和 GND 焊盘，然后上电。
+**进入刷写模式**：短接 IO0 焊盘和 GND 焊盘，然后上电。
 
 ```bash
 # 擦除
@@ -62,7 +62,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset erase-flash
 python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm dout 0x0 firmware.bin
 ```
 
-> 板子没有 FLASH 按键，必须短接 D3-GND 才能进入刷写模式。Micro USB 仅供电，没有数据线。
+> 板子没有 FLASH 按键，必须短接 IO0-GND 才能进入刷写模式。Micro USB 仅供电，没有数据线。
 
 ### 3. 使用
 
@@ -134,7 +134,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 | 4 | D2 | 蓝色 LED | 系统状态指示（低电平点亮） |
 | 12 | D6 | 红色 LED | IR 活动指示（低电平点亮） |
 | 13 | D7 | 黄色 LED / 按键 | 状态指示 + 物理按键（复用引脚） |
-| 0 | D3 | 刷写模式 | 短接 GND 进入刷写模式 |
+| 0 | IO0 | 刷写模式 | 短接 GND 进入刷写模式 |
 
 ## 工作模式
 
