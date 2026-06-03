@@ -48,6 +48,117 @@ bool ledBlinking = false;
 // ===== 从机重连 =====
 unsigned long lastReconnectAttempt = 0;
 
+// ===== Gree YBOFB 自定义编码器 =====
+// 协议参数（基于 raw timing 反算验证）
+#define GREE_HDR_MARK    9000
+#define GREE_HDR_SPACE   4500
+#define GREE_BIT_MARK    620
+#define GREE_ONE_SPACE   1600
+#define GREE_ZERO_SPACE  540
+#define GREE_BLOCK_GAP   19980
+#define GREE_FRAME_GAP   7300
+
+// 模式编码（B0 低 3 位）
+#define GREE_MODE_AUTO   0x00
+#define GREE_MODE_COOL   0x01
+#define GREE_MODE_DRY    0x02
+#define GREE_MODE_FAN    0x03
+#define GREE_MODE_HEAT   0x04
+#define GREE_POWER_BIT   0x08
+
+// 风速编码（B0 bit5-4）
+#define GREE_FAN_AUTO    0x00
+#define GREE_FAN_LOW     0x10
+#define GREE_FAN_MED     0x20
+#define GREE_FAN_HIGH    0x30
+
+// 消息类型标识（B3，实测 14 帧验证）
+#define GREE_MSG_A       0x50
+#define GREE_MSG_B       0x70
+
+uint8_t greeCalcChecksum(const uint8_t data[8]) {
+  uint8_t sum = 10;
+  sum += data[0] & 0x0F;
+  sum += data[1] & 0x0F;
+  sum += data[2] & 0x0F;
+  sum += data[3] & 0x0F;
+  sum += data[4] >> 4;
+  sum += data[5] >> 4;
+  sum += data[6] >> 4;
+  return (sum & 0x0F) << 4;
+}
+
+void greeSendByte(uint8_t data) {
+  for (uint8_t mask = 1; mask; mask <<= 1) {
+    irSend.mark(GREE_BIT_MARK);
+    irSend.space((data & mask) ? GREE_ONE_SPACE : GREE_ZERO_SPACE);
+  }
+}
+
+void greeSendFrame(const uint8_t frame[8], uint32_t endSpace) {
+  irSend.mark(GREE_HDR_MARK);
+  irSend.space(GREE_HDR_SPACE);
+
+  for (int i = 0; i < 4; i++) greeSendByte(frame[i]);
+
+  // 3-bit Footer: 010
+  irSend.mark(GREE_BIT_MARK); irSend.space(GREE_ZERO_SPACE);
+  irSend.mark(GREE_BIT_MARK); irSend.space(GREE_ONE_SPACE);
+  irSend.mark(GREE_BIT_MARK); irSend.space(GREE_ZERO_SPACE);
+
+  irSend.mark(GREE_BIT_MARK);
+  irSend.space(GREE_BLOCK_GAP);
+
+  for (int i = 4; i < 8; i++) greeSendByte(frame[i]);
+
+  irSend.mark(GREE_BIT_MARK);
+  irSend.space(endSpace);
+}
+
+void sendGreeYBOFB(bool power, String mode, int temp, String fan) {
+  uint8_t frameA[8] = {0x00, 0x00, 0x20, GREE_MSG_A, 0x00, 0x00, 0x00, 0x00};
+
+  uint8_t modeVal = GREE_MODE_COOL;
+  if (mode == "Heat")      modeVal = GREE_MODE_HEAT;
+  else if (mode == "Dry")  modeVal = GREE_MODE_DRY;
+  else if (mode == "Fan")  modeVal = GREE_MODE_FAN;
+  else if (mode == "Auto") modeVal = GREE_MODE_AUTO;
+
+  uint8_t fanVal = GREE_FAN_AUTO;
+  if (fan == "Low")        fanVal = GREE_FAN_LOW;
+  else if (fan == "Medium") fanVal = GREE_FAN_MED;
+  else if (fan == "High")  fanVal = GREE_FAN_HIGH;
+
+  frameA[0] = fanVal | modeVal;
+  if (power) frameA[0] |= GREE_POWER_BIT;
+
+  frameA[1] = (uint8_t)(temp - 16) & 0x0F;
+  // frameA[2] = 0x20 (Light=ON) — 已在初始化
+  // frameA[5] = 0x00 — 实测默认值
+  frameA[7] = greeCalcChecksum(frameA);
+
+  uint8_t frameB[8];
+  memcpy(frameB, frameA, 8);
+  frameB[3] = GREE_MSG_B;
+  frameB[6] |= fanVal;
+  frameB[7] = greeCalcChecksum(frameB);
+
+  irRecv.disableIRIn();
+  irSend.enableIROut(38);
+  greeSendFrame(frameA, GREE_FRAME_GAP);
+  greeSendFrame(frameB, 20000);
+  irRecv.enableIRIn();
+
+  Serial.printf("[GREE] Pwr:%s Mode:%s T:%d Fan:%s\n",
+    power ? "ON" : "OFF", mode.c_str(), temp, fan.c_str());
+  Serial.printf("[GREE] A: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+    frameA[0], frameA[1], frameA[2], frameA[3],
+    frameA[4], frameA[5], frameA[6], frameA[7]);
+  Serial.printf("[GREE] B: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+    frameB[0], frameB[1], frameB[2], frameB[3],
+    frameB[4], frameB[5], frameB[6], frameB[7]);
+}
+
 int parseRaw(String& s, uint16_t* buf, int maxLen) {
   int count = 0, start = 0;
   while (count < maxLen) {
@@ -122,6 +233,24 @@ void handleHvac() {
   int temp = server.arg("temp").toInt();
   if (temp < 16 || temp > 30) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"temp_out_of_range\"}");
+    return;
+  }
+
+  // GREE 品牌使用自定义编码器（绕过库的 sendAc）
+  if (vendor == "GREE") {
+    bool power = server.arg("power") == "On";
+    String mode = server.arg("mode");
+    String fan = server.arg("fan");
+
+    sendGreeYBOFB(power, mode, temp, fan);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg), "HVAC:%s,%s,%s,%d,%s,%s",
+      vendor.c_str(), power ? "1" : "0", mode.c_str(), temp,
+      fan.c_str(), server.arg("swing").c_str());
+    broadcastUdp(msg);
+
+    server.send(200, "application/json", "{\"ok\":true}");
     return;
   }
 
@@ -233,7 +362,7 @@ void slaveExecRaw(String data) {
 void slaveExecHvac(String data) {
   // data = "VENDOR,POWER,MODE,TEMP,FAN,SWING"
   int p[6], pi = 0;
-  for (int i = 0; i < data.length() && pi < 6; ) {
+  for (int i = 0; i < (int)data.length() && pi < 6; ) {
     int comma = data.indexOf(',', i);
     if (comma < 0) { p[pi++] = i; break; }
     p[pi++] = i;
@@ -246,6 +375,13 @@ void slaveExecHvac(String data) {
   int temp = (pi > 3) ? data.substring(p[3], data.indexOf(',', p[3])).toInt() : 26;
   String fan = (pi > 4) ? data.substring(p[4], data.indexOf(',', p[4])) : "Auto";
   String swing = (pi > 5) ? data.substring(p[5]) : "Off";
+
+  // GREE 品牌使用自定义编码器
+  if (vendor == "GREE") {
+    sendGreeYBOFB(power, mode, temp, fan);
+    Serial.printf("[SLAVE] GREE %s %s %dC\n", vendor.c_str(), power ? "ON" : "OFF", temp);
+    return;
+  }
 
   decode_type_t proto = strToDecodeType(vendor.c_str());
   if (proto == decode_type_t::UNKNOWN) return;
