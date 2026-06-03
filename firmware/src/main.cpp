@@ -2,6 +2,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <WiFiUdp.h>
+#include <DNSServer.h>
 #include <IRsend.h>
 #include <IRrecv.h>
 #include <IRac.h>
@@ -28,6 +29,7 @@
 #define UDP_PORT       8888
 
 ESP8266WebServer server(80);
+DNSServer dnsServer;
 IRsend irSend(IR_TX);
 IRrecv irRecv(IR_RX, 1024, 50, false);  // timeout 50ms for AC repeat frames
 IRac ac(IR_TX);
@@ -47,6 +49,72 @@ bool ledBlinking = false;
 
 // ===== 从机重连 =====
 unsigned long lastReconnectAttempt = 0;
+
+// ===== Wahin/Midea 华凌自定义编码器 =====
+#define WAHIN_HDR_MARK    4380
+#define WAHIN_HDR_SPACE   4420
+#define WAHIN_BIT_MARK    460
+#define WAHIN_ONE_SPACE   1640
+#define WAHIN_ZERO_SPACE  620
+#define WAHIN_FRAME_GAP   5230
+
+void wahinSendByte(uint8_t data) {
+  for (uint8_t mask = 0x80; mask; mask >>= 1) {
+    irSend.mark(WAHIN_BIT_MARK);
+    irSend.space((data & mask) ? WAHIN_ONE_SPACE : WAHIN_ZERO_SPACE);
+  }
+}
+
+void wahinSendFrame(const uint8_t data[3]) {
+  irSend.mark(WAHIN_HDR_MARK);
+  irSend.space(WAHIN_HDR_SPACE);
+  for (int i = 0; i < 3; i++) {
+    wahinSendByte(data[i]);
+    wahinSendByte(~data[i]);
+  }
+  irSend.mark(WAHIN_BIT_MARK);
+  irSend.space(WAHIN_FRAME_GAP);
+}
+
+// 华凌温度 Gray 码查表 (index = temp - 17, 范围 17-30°C)
+static const uint8_t WAHIN_TEMP_GRAY[] = {
+  0x0, 0x1, 0x3, 0x2, 0x6, 0x7, 0x5, 0x4,
+  0xC, 0xD, 0x9, 0x8, 0xA, 0xB
+};
+
+void sendWahin(bool power, String mode, int temp, String fan, String swing) {
+  temp = constrain(temp, 17, 30);
+
+  // B0: 固定魔数
+  uint8_t data[3] = { 0xB2, 0x00, 0x00 };
+
+  // B1: [ffff][ssss]  ffff=风速(高4bit), ssss=状态(低4bit)
+  // 风速: 0xB=自动(已确认), 0x9=低, 0x5=中, 0x3=高
+  uint8_t fanBits = 0xB;  // 默认自动风
+  if (fan == "Low")         fanBits = 0x9;
+  else if (fan == "Medium") fanBits = 0x5;
+  else if (fan == "High" || fan == "Max") fanBits = 0x3;
+  data[1] = (fanBits << 4) | (power ? 0xF : 0xB);
+
+  // B2: [tttt][mm00]  tttt=温度Gray码(高4bit), mm=模式(bit3-2)
+  uint8_t modeBits = 0x0;  // Cool
+  if (mode == "Heat")      modeBits = 0x3;
+  else if (mode == "Fan")  modeBits = 0x1;
+  else if (mode == "Auto") modeBits = 0x2;
+  else if (mode == "Dry")  modeBits = 0x2;  // 待确认
+  uint8_t tempGray = WAHIN_TEMP_GRAY[temp - 17];
+  data[2] = (tempGray << 4) | (modeBits << 2);
+
+  irRecv.disableIRIn();
+  irSend.enableIROut(38);
+  wahinSendFrame(data);
+  wahinSendFrame(data);
+  irRecv.enableIRIn();
+
+  Serial.printf("[WAHIN] Pwr:%s Mode:%s T:%d Fan:%s Data=[%02X %02X %02X]\n",
+    power ? "ON" : "OFF", mode.c_str(), temp, fan.c_str(),
+    data[0], data[1], data[2]);
+}
 
 // ===== Gree YBOFB 自定义编码器 =====
 // 协议参数（基于 raw timing 反算验证）
@@ -129,6 +197,7 @@ void sendGreeYBOFB(bool power, String mode, int temp, String fan) {
   else if (fan == "Medium") fanVal = GREE_FAN_MED;
   else if (fan == "High")  fanVal = GREE_FAN_HIGH;
 
+  temp = constrain(temp, 16, 30);
   frameA[0] = fanVal | modeVal;
   if (power) frameA[0] |= GREE_POWER_BIT;
 
@@ -215,6 +284,21 @@ void handleRoot() {
     pos += chunk;
     yield();
   }
+  server.sendContent("");
+}
+
+boolean captivePortal() {
+  String host = server.hostHeader();
+  if (host.indexOf("10.1.1.1") >= 0 || host.indexOf("ir-ac") >= 0) return false;
+  server.sendHeader("Location", "http://10.1.1.1/", true);
+  server.send(302, "text/plain", "");
+  server.client().stop();
+  return true;
+}
+
+void handleCaptive() {
+  if (captivePortal()) return;
+  handleRoot();
 }
 
 void handleHvac() {
@@ -225,7 +309,7 @@ void handleHvac() {
   }
 
   decode_type_t proto = strToDecodeType(vendor.c_str());
-  if (proto == decode_type_t::UNKNOWN) {
+  if (proto == decode_type_t::UNKNOWN && vendor != "WAHIN") {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_vendor\"}");
     return;
   }
@@ -248,6 +332,25 @@ void handleHvac() {
     snprintf(msg, sizeof(msg), "HVAC:%s,%s,%s,%d,%s,%s",
       vendor.c_str(), power ? "1" : "0", mode.c_str(), temp,
       fan.c_str(), server.arg("swing").c_str());
+    broadcastUdp(msg);
+
+    server.send(200, "application/json", "{\"ok\":true}");
+    return;
+  }
+
+  // 华凌使用自定义编码器（时序与库的 MIDEA 不匹配）
+  if (vendor == "WAHIN") {
+    bool power = server.arg("power") == "On";
+    String mode = server.arg("mode");
+    String fan = server.arg("fan");
+    String swing = server.arg("swing");
+
+    sendWahin(power, mode, temp, fan, swing);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg), "HVAC:%s,%s,%s,%d,%s,%s",
+      vendor.c_str(), power ? "1" : "0", mode.c_str(), temp,
+      fan.c_str(), swing.c_str());
     broadcastUdp(msg);
 
     server.send(200, "application/json", "{\"ok\":true}");
@@ -380,6 +483,13 @@ void slaveExecHvac(String data) {
   if (vendor == "GREE") {
     sendGreeYBOFB(power, mode, temp, fan);
     Serial.printf("[SLAVE] GREE %s %s %dC\n", vendor.c_str(), power ? "ON" : "OFF", temp);
+    return;
+  }
+
+  // 华凌使用自定义编码器
+  if (vendor == "WAHIN") {
+    sendWahin(power, mode, temp, fan, swing);
+    Serial.printf("[SLAVE] WAHIN %s %s %dC\n", vendor.c_str(), power ? "ON" : "OFF", temp);
     return;
   }
 
@@ -519,9 +629,17 @@ void setup() {
     WiFi.softAP(AP_SSID, AP_PASS, 0);  // 0=自动选最优信道
     Serial.printf("[MASTER] AP: %s  http://%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
 
+    // Captive Portal: 所有 DNS 请求解析到本机，连 WiFi 自动弹出 WebUI
+    dnsServer.start(53, "*", WiFi.softAPIP());
+
     irRecv.enableIRIn();
 
     server.on("/", HTTP_GET, handleRoot);
+    server.on("/generate_204", handleCaptive);
+    server.on("/hotspot-detect.html", handleCaptive);
+    server.on("/connecttest.txt", handleCaptive);
+    server.on("/fwlink", handleCaptive);
+    server.onNotFound(handleCaptive);
     server.on("/api/hvac", HTTP_POST, handleHvac);
     server.on("/api/send", HTTP_POST, handleSend);
     server.on("/api/capture", HTTP_GET, handleCapture);
@@ -553,6 +671,7 @@ void loop() {
   }
 
   server.handleClient();
+  dnsServer.processNextRequest();
 
   decode_results results;
   if (irRecv.decode(&results)) {

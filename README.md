@@ -6,7 +6,9 @@
 
 ## 功能
 
-- **空调控制** — 内置 30+ 品牌空调协议（格力/美的/海尔/大金/三菱/松下等），选品牌调温度一键开机
+- **空调控制** — 内置 30+ 品牌空调协议（格力/华凌/美的/海尔/大金/三菱/松下等），选品牌调温度一键开机
+- **自定义编码器** — 格力 YBOFB、华凌 WAHIN 使用自研编码器，绕过库兼容问题
+- **Captive Portal** — 手机连接 WiFi 后自动弹出控制页面，无需手动输入地址
 - **红外学习** — 捕获任意遥控器信号，命名保存
 - **遥控面板** — 保存的学习按钮一键发送，支持重命名/删除
 - **多设备协同** — 多台设备自动组网，手机控制一台主机，所有设备同步发射红外信号
@@ -66,7 +68,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 
 1. 刷写完成后拔插电源重启
 2. 手机搜索 WiFi `IR-AC`，密码 `12345678`
-3. 连接后浏览器打开 `http://10.1.1.1`
+3. 连接后自动弹出控制页面（Captive Portal）
 4. 选择空调品牌 → 设置温度/模式 → 一键控制
 5. iOS 用户：Safari → 分享 → 添加到主屏幕（变成独立 App）
 
@@ -182,15 +184,25 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 
 内置支持 30+ 空调协议，WebUI 中可选的品牌：
 
+### 自定义编码器（精准控制）
+
+以下品牌使用自研编码器，直接构造红外信号，绕过 IRremoteESP8266 库的兼容问题：
+
 | 品牌 | 协议名 | 说明 |
 |------|--------|------|
-| TECO | `TECO` | TECO 空调 |
-| 格力 | `GREE` | 标准 64 位协议 |
-| 格力 112bit | `GREE112` | 112 位扩展协议 |
-| 美的 | `MIDEA` | 美的空调 |
+| 华凌 | `WAHIN` | R05D 协议，Gray 码温度编码，MSB-first |
+| 格力 | `GREE` | YBOFB 遥控器，LSB-first，双帧 A+B 模式 |
+
+### IRremoteESP8266 库支持
+
+| 品牌 | 协议名 | 说明 |
+|------|--------|------|
+| 美的 | `MIDEA` | 美的空调（48-bit 协议） |
+| 美的 (24bit) | `MIDEA24` | 美的空调（24-bit 协议） |
 | 海尔 | `HAIER` | 海尔空调 |
 | 科龙 | `KELON` | 科龙空调 |
 | TCL | `TCL112` | TCL 空调 |
+| TECO | `TECO` | TECO 空调 |
 | 大金 | `DAIKIN` | 大金空调 |
 | 东芝 | `TOSHIBA` | 东芝空调 |
 | 三菱 | `MITSUBISHI` | 三菱电机 |
@@ -208,7 +220,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 | York | `YORK` | York 空调 |
 | Coolix | `COOLIX` | 万能协议 |
 
-> 不同品牌的空调可能使用不同协议。如果内置品牌无法控制，请使用「学习」功能捕获遥控器原始信号。
+> 如果内置品牌无法控制，请使用「学习」功能捕获遥控器原始信号。
 
 ## API
 
@@ -256,6 +268,7 @@ firmware/
 - **框架**：Arduino (ESP8266)
 - **IR 库**：[IRremoteESP8266](https://github.com/crankyoldgit/IRremoteESP8266) v2.8.6+
 - **Web 服务器**：ESP8266WebServer
+- **DNS**：DNSServer（Captive Portal 自动弹出）
 - **设备通信**：WiFi UDP 广播（端口 8888）
 - **前端**：原生 HTML/CSS/JS，无框架依赖
 
@@ -265,6 +278,7 @@ firmware/
 |------|------|
 | v1.3 | 初始版本，基础空调控制 + 学习 + 协同 |
 | v1.4 | 网络配置宏化、AP 自动选频、按键触发 IR、灯光 bug 修复 |
+| v1.5 | 华凌空调自定义编码器（R05D/Gray码）、格力 YBOFB 自定义编码器、Captive Portal 自动弹出 |
 
 ## 许可证
 

@@ -133,13 +133,14 @@ nav.bar{max-width:var(--max);left:50%;transform:translateX(-50%);border-radius:v
 <div class="cd"><div class="cd-h">品牌</div><div class="cd-b">
 <select id="ac-v">
 <optgroup label="常用">
-<option value="TECO">TECO</option>
+<option value="GREE">格力</option>
+<option value="WAHIN">华凌</option>
+<option value="MIDEA">美的</option>
 </optgroup>
 <optgroup label="国产主流">
-<option value="GREE">格力</option>
 <option value="GREE112">格力 (112bit)</option>
-<option value="MIDEA">美的</option>
 <option value="MIDEA24">美的 (24bit)</option>
+<option value="TECO">TECO</option>
 <option value="HAIER_AC">海尔</option>
 <option value="HAIER_AC_YRWO2">海尔 (YRW02)</option>
 <option value="KELON">科龙</option>
