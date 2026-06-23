@@ -12,6 +12,8 @@
 - **红外学习** — 捕获任意遥控器信号，命名保存
 - **遥控面板** — 保存的学习按钮一键发送，支持重命名/删除
 - **多设备协同** — 多台设备自动组网，手机控制一台主机，所有设备同步发射红外信号
+- **AP 热点可配置** — 通过 WebUI 自定义热点名称和密码，从机自动适配
+- **恢复出厂设置** — WebUI 一键恢复出厂，或长按硬件按键 5 秒重置
 - **iOS 风格界面** — 手机端优化，添加到主屏幕即变成独立 App
 - **零依赖** — 不需要电脑、路由器、互联网，板子自己就是热点
 
@@ -37,10 +39,10 @@
 
 ```bash
 cd firmware
-pio run -e nodemcuv2
+pio run -e rom0
 ```
 
-编译产物在 `.pio/build/nodemcuv2/firmware.bin`。
+编译产物在 `.pio/build/rom0/firmware.bin`。
 
 ### 2. 刷写固件
 
@@ -113,17 +115,17 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 
 设备上电后自动创建 WiFi 热点（AP 模式），默认配置：
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| WiFi 名称 | `IR-AC` | 即 `AP_SSID` 宏定义 |
-| WiFi 密码 | `12345678` | 即 `AP_PASS` 宏定义 |
-| 设备 IP | `10.1.1.1` | 即 `AP_IP` 宏定义 |
-| 子网掩码 | `255.255.255.0` | 即 `AP_SUBNET` |
-| 广播地址 | `10.1.1.255` | 即 `AP_BROADCAST`，用于 UDP 协同 |
-| UDP 端口 | `8888` | 即 `UDP_PORT`，主从通信端口 |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| WiFi 名称 | `IR-AC` | 可通过 WebUI 修改，从机自动适配 |
+| WiFi 密码 | `12345678` | 可通过 WebUI 修改，至少 8 位 |
+| 设备 IP | `10.1.1.1` | AP 模式固定 IP |
+| 子网掩码 | `255.255.255.0` | — |
+| 广播地址 | `10.1.1.255` | UDP 协同通信 |
+| UDP 端口 | `8888` | 主从通信端口 |
 | AP 信道 | 自动（0） | 自动选择干扰最小的信道 |
 
-> 所有网络参数均为 `main.cpp` 顶部的宏定义，可按需修改。
+> WiFi 名称和密码可通过 WebUI「设置 → 热点配置」修改，保存后设备重启生效。所有从机需使用相同的热点名称和密码才能自动组网。从机启动时先尝试自定义名称，找不到则回退到默认 `IR-AC`。恢复出厂后回到默认配置。
 
 ## GPIO 引脚分配
 
@@ -133,7 +135,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 | 5 | D1 | IR 接收 | VS1838B 红外接收器 |
 | 4 | D2 | 蓝色 LED | 系统状态指示（低电平点亮） |
 | 12 | D6 | 红色 LED | IR 活动指示（低电平点亮） |
-| 13 | D7 | 黄色 LED / 按键 | 状态指示 + 物理按键（复用引脚） |
+| 13 | D7 | 黄色 LED / 按键 | 状态指示 + 长按 5 秒恢复出厂（复用引脚） |
 | 0 | IO0 | 刷写模式 | 短接 GND 进入刷写模式 |
 
 ## 工作模式
@@ -178,7 +180,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 | 空调 | 选择品牌，设置温度/模式/风速，一键开关机 |
 | 学习 | 捕获遥控器信号，命名保存 |
 | 遥控 | 发送已保存的信号，支持编辑/删除 |
-| 设置 | 导出/导入配置，清除数据 |
+| 设置 | WiFi/MQTT/热点配置，导出/导入，恢复出厂，OTA 更新 |
 
 ## 空调品牌
 
@@ -229,6 +231,15 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 | `/` | GET | WebUI 页面 |
 | `/api/hvac` | POST | 空调控制 |
 | `/api/send` | POST | 发送原始红外信号 |
+| `/api/capture` | GET | 获取最近捕获信号 |
+| `/api/wifi/scan` | GET | 扫描 WiFi 网络 |
+| `/api/wifi/connect` | POST | 连接 WiFi 并重启 |
+| `/api/wifi/status` | GET | 当前网络状态 |
+| `/api/wifi/forget` | POST | 清除 WiFi 配置并重启 |
+| `/api/ap/config` | GET/POST | 读取/保存 AP 热点配置 |
+| `/api/mqtt/config` | GET/POST | 读取/保存 MQTT 配置 |
+| `/api/factory/reset` | POST | 恢复出厂设置 |
+| `/api/sensor` | GET | 温度和人体传感器状态 |
 | `/api/capture` | GET | 获取最近捕获的信号 |
 
 ### `/api/hvac` 空调控制
@@ -258,8 +269,8 @@ GET 返回最近一次红外学习捕获到的原始时序数据。
 
 ```
 firmware/
-├── platformio.ini          # PlatformIO 配置
-├── src/main.cpp            # 主程序（AP/STA + WebServer + IR + UDP 协同）
+├── platformio.ini          # PlatformIO 配置（rboot 双分区）
+├── src/main.cpp            # 主程序（AP/STA/Home 三模式 + WebServer + IR + UDP + MQTT + 传感器）
 └── include/webui.h         # iOS 风格 WebUI（PROGMEM 内嵌）
 ```
 
@@ -279,6 +290,8 @@ firmware/
 | v1.3 | 初始版本，基础空调控制 + 学习 + 协同 |
 | v1.4 | 网络配置宏化、AP 自动选频、按键触发 IR、灯光 bug 修复 |
 | v1.5 | 华凌空调自定义编码器（R05D/Gray码）、格力 YBOFB 自定义编码器、Captive Portal 自动弹出 |
+| v2.0 | WiFi STA + MQTT Home Assistant + DS18B20 温度 + AM312 人体传感器 + rboot 双分区 OTA |
+| v2.2 | AP 热点名称/密码可配置、从机自适应组网、硬件长按恢复出厂、WebUI 恢复出厂设置 |
 
 ## 许可证
 

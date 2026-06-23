@@ -8,6 +8,13 @@
 *.elf
 *.hex
 *.map
+*.o
+
+# 例外：rboot 预编译引导器（构建/刷写需要）
+!firmware/rboot-bootloader/rboot.bin
+
+# rboot 中间构建产物
+firmware/rboot-bootloader/build/
 
 # IDE
 .vscode/

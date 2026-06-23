@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266HTTPUpdateServer.h>
+#include "rboot.h"
 #include <WiFiUdp.h>
 #include <DNSServer.h>
 #include <LittleFS.h>
@@ -42,7 +42,6 @@ DeviceMode deviceMode = MODE_AP_MASTER;
 
 // ===== 全局对象 =====
 ESP8266WebServer server(80);
-ESP8266HTTPUpdateServer httpUpdater(true);  // true = 启用认证
 DNSServer dnsServer;
 IRsend irSend(IR_TX);
 IRrecv irRecv(IR_RX, 1024, 50, false);
@@ -53,6 +52,8 @@ PubSubClient mqtt(mqttNet);
 
 // ===== 配置（LittleFS 持久化）=====
 struct Config {
+  char ap_ssid[33] = "";       // AP 热点名称（空=默认 AP_SSID）
+  char ap_pass[33] = "";       // AP 热点密码（空=默认 AP_PASS）
   char sta_ssid[64] = "";
   char sta_pass[64] = "";
   char mqtt_host[64] = "";
@@ -61,6 +62,10 @@ struct Config {
   char mqtt_pass[32] = "";
   char mqtt_topic[32] = "ir_ac";
 } cfg;
+
+// AP 配置辅助函数（空值回退到默认宏）
+const char* getApSsid() { return strlen(cfg.ap_ssid) ? cfg.ap_ssid : AP_SSID; }
+const char* getApPass() { return strlen(cfg.ap_pass) ? cfg.ap_pass : AP_PASS; }
 
 // ===== 捕获状态 =====
 String capturedRaw;
@@ -75,6 +80,13 @@ bool ledBlinking = false;
 // ===== 重连计时器 =====
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastMqttReconnect = 0;
+
+// ===== GPIO13 按键（与黄色 LED 复用）=====
+unsigned long btnPressStart = 0;
+bool btnPressed = false;
+unsigned long lastBtnCheck = 0;
+#define BTN_CHECK_INTERVAL 50   // 按键轮询间隔 (ms)
+#define BTN_LONG_PRESS_MS 5000  // 长按恢复出厂阈值 (ms)
 bool mqttEnabled = false;
 
 // ===== 运行状态（用于 MQTT 状态上报）=====
@@ -92,6 +104,26 @@ float roomTempC = -127.0;
 bool pirDetected = false;
 unsigned long lastSensorRead = 0;
 #define SENSOR_INTERVAL 10000
+
+// ===== OTA 双分区状态 =====
+// magic + version allow future-proofing: if the struct layout changes, an
+// older or newer build will see a mismatched magic and reset to defaults
+// instead of misinterpreting random bytes as OTA state.
+#define OTA_STATE_MAGIC   0x4F544153  // "OTAS"
+#define OTA_STATE_VERSION 0x01
+struct OTAState {
+    uint32_t magic;          // OTA_STATE_MAGIC
+    uint8_t  version;        // OTA_STATE_VERSION
+    bool     pending;        // OTA 待验证
+    uint8_t  previous_rom;   // 上一个 ROM 槽号
+    uint32_t timestamp;      // OTA 时间戳
+};
+OTAState otaState = {OTA_STATE_MAGIC, OTA_STATE_VERSION, false, 0, 0};
+static size_t otaUploadSize = 0;
+static uint32_t otaTargetAddr = 0;
+static bool otaWriteOk = true;
+static uint8_t otaAccBuf[4096];
+static size_t otaAccLen = 0;
 
 // ===== 华凌自定义编码器 =====
 #define WAHIN_HDR_MARK    4380
@@ -331,7 +363,9 @@ bool loadConfig() {
     if (eq < 0) continue;
     String key = line.substring(0, eq);
     String val = line.substring(eq + 1);
-    if (key == "ssid") { strncpy(cfg.sta_ssid, val.c_str(), sizeof(cfg.sta_ssid) - 1); cfg.sta_ssid[sizeof(cfg.sta_ssid) - 1] = '\0'; }
+    if (key == "ap_ssid") { strncpy(cfg.ap_ssid, val.c_str(), sizeof(cfg.ap_ssid) - 1); cfg.ap_ssid[sizeof(cfg.ap_ssid) - 1] = '\0'; }
+    else if (key == "ap_pass") { strncpy(cfg.ap_pass, val.c_str(), sizeof(cfg.ap_pass) - 1); cfg.ap_pass[sizeof(cfg.ap_pass) - 1] = '\0'; }
+    else if (key == "ssid") { strncpy(cfg.sta_ssid, val.c_str(), sizeof(cfg.sta_ssid) - 1); cfg.sta_ssid[sizeof(cfg.sta_ssid) - 1] = '\0'; }
     else if (key == "pass") { strncpy(cfg.sta_pass, val.c_str(), sizeof(cfg.sta_pass) - 1); cfg.sta_pass[sizeof(cfg.sta_pass) - 1] = '\0'; }
     else if (key == "mqtt_host") { strncpy(cfg.mqtt_host, val.c_str(), sizeof(cfg.mqtt_host) - 1); cfg.mqtt_host[sizeof(cfg.mqtt_host) - 1] = '\0'; }
     else if (key == "mqtt_port") cfg.mqtt_port = val.toInt();
@@ -340,14 +374,16 @@ bool loadConfig() {
     else if (key == "mqtt_topic") { strncpy(cfg.mqtt_topic, val.c_str(), sizeof(cfg.mqtt_topic) - 1); cfg.mqtt_topic[sizeof(cfg.mqtt_topic) - 1] = '\0'; }
   }
   f.close();
-  Serial.printf("[CFG] ssid=%s mqtt=%s:%d topic=%s\n",
-    cfg.sta_ssid, cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_topic);
+  Serial.printf("[CFG] ap=%s sta=%s mqtt=%s:%d topic=%s\n",
+    getApSsid(), cfg.sta_ssid, cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_topic);
   return strlen(cfg.sta_ssid) > 0;
 }
 
 void saveConfig() {
   File f = LittleFS.open("/config.txt", "w");
   if (!f) { Serial.println("[CFG] write failed"); return; }
+  f.printf("ap_ssid=%s\n", cfg.ap_ssid);
+  f.printf("ap_pass=%s\n", cfg.ap_pass);
   f.printf("ssid=%s\n", cfg.sta_ssid);
   f.printf("pass=%s\n", cfg.sta_pass);
   f.printf("mqtt_host=%s\n", cfg.mqtt_host);
@@ -570,11 +606,11 @@ void handleWifiStatus() {
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
     json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   } else if (deviceMode == MODE_AP_MASTER) {
-    json += "\"ssid\":\"" + String(AP_SSID) + "\",";
+    json += "\"ssid\":\"" + String(getApSsid()) + "\",";
     json += "\"ip\":\"" + WiFi.softAPIP().toString() + "\",";
     json += "\"rssi\":0,";
   } else {
-    json += "\"ssid\":\"" + String(AP_SSID) + "\",";
+    json += "\"ssid\":\"" + String(getApSsid()) + "\",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
     json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   }
@@ -590,6 +626,47 @@ void handleWifiForget() {
   saveConfig();
   server.send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
   delay(500);
+  ESP.restart();
+}
+
+void handleApConfig() {
+  if (server.method() == HTTP_GET) {
+    String json = "{";
+    json += "\"ssid\":\"" + jsonEscape(String(cfg.ap_ssid)) + "\",";
+    json += "\"pass\":\"" + jsonEscape(String(cfg.ap_pass)) + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+  String ssid = server.arg("ssid");
+  String pass = server.arg("pass");
+  if (ssid.length() == 0 || ssid.length() > 32) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_ssid\"}");
+    return;
+  }
+  if (pass.length() > 0 && pass.length() < 8) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"password_min_8\"}");
+    return;
+  }
+  if (pass.length() > 32) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"password_max_32\"}");
+    return;
+  }
+  strncpy(cfg.ap_ssid, ssid.c_str(), sizeof(cfg.ap_ssid) - 1);
+  cfg.ap_ssid[sizeof(cfg.ap_ssid) - 1] = '\0';
+  strncpy(cfg.ap_pass, pass.c_str(), sizeof(cfg.ap_pass) - 1);
+  cfg.ap_pass[sizeof(cfg.ap_pass) - 1] = '\0';
+  saveConfig();
+  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
+  delay(500);
+  ESP.restart();
+}
+
+void handleFactoryReset() {
+  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
+  delay(500);
+  LittleFS.remove("/config.txt");
+  LittleFS.remove("/ota_state.bin");
   ESP.restart();
 }
 
@@ -650,8 +727,161 @@ void updateSensors() {
   }
 }
 
+// ===== OTA 双分区上传处理 =====
+void otaUploadHandler() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        if (!server.authenticate("admin", "12345678")) {
+            otaWriteOk = false;
+            return;
+        }
+        otaUploadSize = 0;
+        otaAccLen = 0;
+        otaWriteOk = true;
+        uint8_t target = rboot_get_target_rom();
+        otaTargetAddr = rboot_get_rom_address(target);
+        Serial.printf("[OTA] Start ROM %d at 0x%06X\n", target, otaTargetAddr);
+    } else if (upload.status == UPLOAD_FILE_WRITE && otaWriteOk) {
+        // 防御: 固件大小不能超过 ROM slot (~1016KB = 0xFE000)
+        if (otaUploadSize + otaAccLen + upload.currentSize > 0xFE000) {
+            Serial.printf("[OTA] FIRMWARE TOO LARGE: %d + %d bytes\n",
+                          otaUploadSize + otaAccLen, upload.currentSize);
+            otaWriteOk = false;
+            return;
+        }
+        size_t space = sizeof(otaAccBuf) - otaAccLen;
+        size_t copy = (upload.currentSize < space) ? upload.currentSize : space;
+        memcpy(otaAccBuf + otaAccLen, upload.buf, copy);
+        otaAccLen += copy;
+        if (otaAccLen >= sizeof(otaAccBuf)) {
+            otaWriteOk = rboot_write_flash(otaTargetAddr + otaUploadSize,
+                                           otaAccBuf, otaAccLen);
+            otaUploadSize += otaAccLen;
+            otaAccLen = 0;
+        }
+        // 处理剩余数据
+        if (copy < upload.currentSize && otaWriteOk) {
+            size_t remain = upload.currentSize - copy;
+            memcpy(otaAccBuf, upload.buf + copy, remain);
+            otaAccLen = remain;
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        // 刷写最后一块
+        if (otaAccLen > 0 && otaWriteOk) {
+            otaWriteOk = rboot_write_flash(otaTargetAddr + otaUploadSize,
+                                           otaAccBuf, otaAccLen);
+            otaUploadSize += otaAccLen;
+            otaAccLen = 0;
+        }
+        Serial.printf("[OTA] Upload done: %d bytes, %s\n",
+                      otaUploadSize, otaWriteOk ? "OK" : "FAILED");
+    }
+}
+
+void otaFinishHandler() {
+    if (!server.authenticate("admin", "12345678")) {
+        return server.requestAuthentication();
+    }
+    if (!otaWriteOk || otaUploadSize == 0) {
+        server.send(500, "text/plain", "OTA write failed");
+        return;
+    }
+
+    otaState.magic = OTA_STATE_MAGIC;
+    otaState.version = OTA_STATE_VERSION;
+    otaState.pending = true;
+    otaState.previous_rom = rboot_get_current_rom();
+    otaState.timestamp = millis();
+
+    File f = LittleFS.open("/ota_state.bin", "w");
+    if (f) { f.write((uint8_t*)&otaState, sizeof(otaState)); f.close(); }
+
+    uint8_t target = rboot_get_target_rom();
+    Serial.printf("[OTA] Switching to ROM %d, rebooting...\n", target);
+    rboot_set_current_rom(target);
+    delay(100);
+    ESP.restart();
+}
+
+void handleOTAStatus() {
+    uint8_t cur = rboot_get_current_rom();
+    rboot_config conf = rboot_get_config();
+    String json = "{\"ok\":true,\"current_rom\":";
+    json += String(cur);
+    json += ",\"rom0_addr\":\"0x";
+    json += String(conf.roms[0], HEX);
+    json += "\",\"rom1_addr\":\"0x";
+    json += String(conf.roms[1], HEX);
+    json += "\",\"ota_pending\":";
+    json += otaState.pending ? "true" : "false";
+    json += ",\"sketch_size\":";
+    json += String(ESP.getSketchSize());
+    json += ",\"free_space\":";
+    json += String(ESP.getFreeSketchSpace());
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+void loadOTAState() {
+    File f = LittleFS.open("/ota_state.bin", "r");
+    if (f && f.size() == sizeof(otaState)) {
+        f.read((uint8_t*)&otaState, sizeof(otaState));
+        f.close();
+        if (otaState.magic != OTA_STATE_MAGIC || otaState.version != OTA_STATE_VERSION) {
+            // Old format or corrupt — reset to defaults.
+            otaState = {OTA_STATE_MAGIC, OTA_STATE_VERSION, false, 0, 0};
+        }
+    } else {
+        otaState = {OTA_STATE_MAGIC, OTA_STATE_VERSION, false, 0, 0};
+        if (f) f.close();
+    }
+}
+
+void clearOTAState() {
+    otaState = {OTA_STATE_MAGIC, OTA_STATE_VERSION, false, 0, 0};
+    File f = LittleFS.open("/ota_state.bin", "w");
+    if (f) { f.write((uint8_t*)&otaState, sizeof(otaState)); f.close(); }
+}
+
+void checkOTARollback() {
+    loadOTAState();
+    if (!otaState.pending) return;
+
+    Serial.println("[OTA] Pending update detected, health check...");
+
+    // 检查 1: LittleFS 能挂载（已挂载）
+    // 检查 2: 能执行到这里说明代码在运行
+    bool healthy = true;
+
+    // STA Home 模式额外检查 WiFi
+    if (deviceMode == MODE_STA_HOME) {
+        int wifiWait = 0;
+        while (WiFi.status() != WL_CONNECTED && wifiWait < 20) {
+            delay(500);
+            wifiWait++;
+        }
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[OTA] WiFi failed, rollback!");
+            healthy = false;
+        }
+    }
+
+    if (healthy) {
+        Serial.println("[OTA] Health check passed, update confirmed");
+        clearOTAState();
+    } else {
+        uint8_t prev = otaState.previous_rom;
+        Serial.printf("[OTA] Rolling back to ROM %d\n", prev);
+        clearOTAState();
+        rboot_set_current_rom(prev);
+        delay(100);
+        ESP.restart();
+    }
+}
+
 void registerApiRoutes() {
-  httpUpdater.setup(&server, "admin", "12345678");
+  server.on("/update", HTTP_POST, otaFinishHandler, otaUploadHandler);
+  server.on("/api/ota/status", HTTP_GET, handleOTAStatus);
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/hvac", HTTP_POST, handleHvac);
   server.on("/api/send", HTTP_POST, handleSend);
@@ -661,6 +891,8 @@ void registerApiRoutes() {
   server.on("/api/wifi/status", HTTP_GET, handleWifiStatus);
   server.on("/api/wifi/forget", HTTP_POST, handleWifiForget);
   server.on("/api/mqtt/config", HTTP_ANY, handleMqttConfig);
+  server.on("/api/ap/config", HTTP_ANY, handleApConfig);
+  server.on("/api/factory/reset", HTTP_POST, handleFactoryReset);
   server.on("/api/sensor", HTTP_GET, handleSensorStatus);
 }
 
@@ -842,6 +1074,43 @@ void slaveExecHvac(String data) {
   Serial.printf("[SLAVE] %s %s %dC\n", vendor.c_str(), power ? "ON" : "OFF", temp);
 }
 
+void checkButton() {
+  if (millis() - lastBtnCheck < BTN_CHECK_INTERVAL) return;
+  lastBtnCheck = millis();
+
+  bool ledWasOn = (digitalRead(LED_YELLOW) == LOW);
+  pinMode(LED_YELLOW, INPUT_PULLUP);
+  delayMicroseconds(100);
+  bool btnState = digitalRead(LED_YELLOW);
+  pinMode(LED_YELLOW, OUTPUT);
+  if (ledWasOn) LED_ON(LED_YELLOW); else LED_OFF(LED_YELLOW);
+
+  if (btnState == LOW) {
+    if (!btnPressed) {
+      btnPressed = true;
+      btnPressStart = millis();
+      Serial.println("[BTN] Pressed");
+    } else {
+      unsigned long elapsed = millis() - btnPressStart;
+      if (elapsed >= BTN_LONG_PRESS_MS) {
+        Serial.println("[BTN] Long press → factory reset!");
+        for (int i = 0; i < 10; i++) {
+          LED_ON(LED_YELLOW); delay(50);
+          LED_OFF(LED_YELLOW); delay(50);
+        }
+        LittleFS.remove("/config.txt");
+        LittleFS.remove("/ota_state.bin");
+        ESP.restart();
+      } else if (elapsed >= 2000) {
+        if ((millis() / 200) % 2 == 0) LED_ON(LED_YELLOW);
+        else LED_OFF(LED_YELLOW);
+      }
+    }
+  } else {
+    btnPressed = false;
+  }
+}
+
 void slaveLoop() {
   int packetSize = udp.parsePacket();
   if (!packetSize) return;
@@ -910,6 +1179,8 @@ void setup() {
     }
   }
 
+  Serial.printf("[BOOT] ROM %d (rboot dual-partition)\n", rboot_get_current_rom());
+
   // ===== 加载配置 =====
   bool hasSTA = loadConfig();
   Serial.printf("[BOOT] STA config: %s\n", hasSTA ? cfg.sta_ssid : "(none)");
@@ -931,6 +1202,9 @@ void setup() {
       deviceMode = MODE_STA_HOME;
       Serial.printf("\n[STA] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
+      // ===== OTA 健康检查 (STA Home 模式，WiFi 已连接) =====
+      checkOTARollback();
+
       registerApiRoutes();
       server.begin();
       irRecv.enableIRIn();
@@ -948,19 +1222,35 @@ void setup() {
     Serial.println("\n[STA] Failed, falling back to AP mode");
   }
 
-  // ===== 原有逻辑：扫描 IR-AC → 从机或主机 =====
+  // ===== OTA 健康检查（无 STA 配置或 STA 连接失败） =====
+  checkOTARollback();
+
+  // ===== 扫描 IR-AC → 从机或主机 =====
   Serial.println("[BOOT] Scanning WiFi...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
 
   int n = WiFi.scanNetworks();
+  const char* targetSsid = getApSsid();
+  const char* targetPass = getApPass();
   bool foundMaster = false;
   for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == AP_SSID) {
+    if (WiFi.SSID(i) == targetSsid) {
       foundMaster = true;
-      Serial.printf("[BOOT] Found existing AP: %s (RSSI: %d)\n", AP_SSID, WiFi.RSSI(i));
+      Serial.printf("[BOOT] Found AP: %s (RSSI: %d)\n", targetSsid, WiFi.RSSI(i));
       break;
+    }
+  }
+  if (!foundMaster && strcmp(targetSsid, AP_SSID) != 0) {
+    for (int i = 0; i < n; i++) {
+      if (WiFi.SSID(i) == AP_SSID) {
+        foundMaster = true;
+        targetSsid = AP_SSID;
+        targetPass = AP_PASS;
+        Serial.printf("[BOOT] Fallback to default AP: %s\n", AP_SSID);
+        break;
+      }
     }
   }
   WiFi.scanDelete();
@@ -968,8 +1258,8 @@ void setup() {
   if (foundMaster) {
     deviceMode = MODE_STA_SLAVE;
     WiFi.mode(WIFI_STA);
-    WiFi.begin(AP_SSID, AP_PASS);
-    Serial.printf("[SLAVE] Connecting to %s...\n", AP_SSID);
+    WiFi.begin(targetSsid, targetPass);
+    Serial.printf("[SLAVE] Connecting to %s...\n", targetSsid);
 
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 40) {
@@ -1004,8 +1294,8 @@ void setup() {
     IPAddress gateway(AP_GATEWAY);
     IPAddress subnet(AP_SUBNET);
     WiFi.softAPConfig(local_IP, gateway, subnet);
-    WiFi.softAP(AP_SSID, AP_PASS, 0);
-    Serial.printf("[MASTER] AP: %s  http://%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+    WiFi.softAP(getApSsid(), getApPass(), 0);
+    Serial.printf("[MASTER] AP: %s  http://%s\n", getApSsid(), WiFi.softAPIP().toString().c_str());
 
     dnsServer.start(53, "*", WiFi.softAPIP());
     irRecv.enableIRIn();
@@ -1041,6 +1331,8 @@ void loop() {
     LED_OFF(LED_RED);
     ledBlinking = false;
   }
+
+  checkButton();
 
   // 从机模式：UDP 监听
   if (deviceMode == MODE_STA_SLAVE) {

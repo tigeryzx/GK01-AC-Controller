@@ -252,6 +252,13 @@ nav.bar{max-width:var(--max);left:50%;transform:translateX(-50%);border-radius:v
 <button class="b b-rd b-fw" style="font-size:14px" onclick="forgetWifi()">忘记网络（切回AP模式）</button>
 </div>
 </div></div>
+<div class="cd"><div class="cd-h">热点配置</div><div class="cd-b">
+<div style="font-size:13px;color:var(--text3);margin-bottom:8px">
+配置 AP 热点名称和密码。从机使用相同配置自动组网，恢复出厂后回到默认值。</div>
+<input type="text" id="ap-ssid" placeholder="热点名称（默认 IR-AC）" style="margin-bottom:8px">
+<input type="text" id="ap-pass" placeholder="热点密码（至少8位，默认 12345678）" style="margin-bottom:10px">
+<button class="b b-bl b-fw" onclick="saveApConfig()">保存热点配置并重启</button>
+</div></div>
 <div class="cd"><div class="cd-h">MQTT</div><div class="cd-b">
 <input type="text" id="mqtt-host" placeholder="服务器地址（如 192.168.1.100）" style="margin-bottom:8px">
 <div style="display:flex;gap:8px;margin-bottom:8px">
@@ -266,6 +273,7 @@ nav.bar{max-width:var(--max);left:50%;transform:translateX(-50%);border-radius:v
 <div class="it" onclick="exportAll()"><span>导出配置</span><span class="arr"></span></div>
 <div class="it" onclick="importAll()"><span>导入配置</span><span class="arr"></span></div>
 <div class="it" onclick="clearAll()"><span style="color:var(--red)">清除所有数据</span><span class="arr"></span></div>
+<div class="it" onclick="factoryReset()"><span style="color:var(--red)">恢复出厂设置</span><span class="arr"></span></div>
 </div>
 <div class="cd"><div class="cd-h">关于</div>
 <div class="it"><span>版本</span><span style="color:var(--gray)">v2.1</span></div>
@@ -273,10 +281,15 @@ nav.bar{max-width:var(--max);left:50%;transform:translateX(-50%);border-radius:v
 <div class="it"><span>协议库</span><span style="color:var(--gray)">IRremoteESP8266</span></div>
 </div>
 <div class="cd"><div class="cd-h">固件更新 (OTA)</div><div class="cd-b">
-<div style="font-size:13px;color:var(--text3);margin-bottom:12px">
-通过浏览器上传 .bin 固件文件，无需 USB-TTL 刷写器。升级过程约需 30 秒，期间设备会自动重启。
+<div style="font-size:13px;color:var(--text3);margin-bottom:8px">
+<div>当前分区: ROM <span id="ota-rom">-</span></div>
+<div style="margin-top:4px">上传新固件将写入另一个分区，启动失败自动回退</div>
 </div>
-<a href="/update" target="_blank" class="b b-or b-fw" style="text-decoration:none">&#128260; 打开固件更新页面</a>
+<form method="POST" action="/update" enctype="multipart/form-data" id="ota-form">
+<input type="file" name="firmware" accept=".bin" style="margin:8px 0;font-size:14px" required>
+<button type="submit" class="b b-or b-fw" id="ota-btn">上传并更新</button>
+</form>
+<div id="ota-msg" style="font-size:13px;margin-top:8px"></div>
 </div></div></div>
 <nav class="bar">
 <a class="active" onclick="go('ac')"><i>&#10052;&#65039;</i>空调</a>
@@ -288,6 +301,8 @@ nav.bar{max-width:var(--max);left:50%;transform:translateX(-50%);border-radius:v
 var sigs=JSON.parse(localStorage.getItem('ir_sigs')||'[]');
 var hist=[],recording=false,latestRaw='',latestProto='',latestBits=0,pollTimer=null;
 var renameIdx=-1;
+fetch('/api/ota/status').then(function(r){return r.json()}).then(function(d){var el=$('ota-rom');if(el)el.textContent=d.current_rom}).catch(function(){});
+(function(){var f=$('ota-form');if(f)f.onsubmit=function(){var b=$('ota-btn');if(b)b.textContent='上传中...';var m=$('ota-msg');if(m)m.textContent='固件上传中，请勿断电。完成后设备自动重启。'}})();
 function $(i){return document.getElementById(i)}
 function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},1500)}
 function go(p){
@@ -513,6 +528,28 @@ function saveMqtt(){
     +'&pass='+encodeURIComponent($('mqtt-pass').value)
     +'&topic='+encodeURIComponent($('mqtt-topic').value)})
   .then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启中...':'失败')});
+}
+function loadApConfig(){
+  fetch('/api/ap/config').then(function(r){return r.json()}).then(function(d){
+    if(d.ssid)$('ap-ssid').value=d.ssid;
+    if(d.pass)$('ap-pass').value=d.pass;
+  }).catch(function(){});
+}
+loadApConfig();
+function saveApConfig(){
+  var ssid=$('ap-ssid').value.trim();if(!ssid){toast('请输入热点名称');return}
+  if(ssid.length>32){toast('名称不能超过32个字符');return}
+  var pass=$('ap-pass').value;
+  if(pass.length>0&&pass.length<8){toast('密码至少8位');return}
+  toast('保存中...');
+  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass)})
+  .then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启中，请等待30秒...':'失败: '+(d.error||''))});
+}
+function factoryReset(){
+  if(!confirm('确定恢复出厂设置？\n\n所有配置将被清除（WiFi、MQTT、热点配置）。\n设备将以默认 IR-AC / 12345678 启动。'))return;
+  toast('恢复出厂中...');
+  fetch('/api/factory/reset',{method:'POST'}).then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启中...':'失败')}).catch(function(){toast('失败')});
 }
 </script>
 </body></html>)rawliteral";
