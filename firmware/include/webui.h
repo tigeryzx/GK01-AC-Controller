@@ -97,6 +97,20 @@ font-size:12px;word-break:break-all;max-height:80px;overflow-y:auto;margin:8px 0
 .slave-row:last-child{border-bottom:none}
 .slave-mac{flex:1;color:var(--gray)}
 .slave-ip{color:var(--gray);font-size:12px;margin-right:8px}
+.floor-h{font-size:14px;font-weight:600;color:var(--text2);padding:0 4px 8px;margin-top:4px}
+.dev-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
+.dev-card{background:var(--card);border-radius:14px;padding:14px;display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;transition:transform .08s;box-shadow:0 .5px 2px rgba(0,0,0,.06)}
+.dev-card:active{transform:scale(.96)}
+.dev-card.master{border:2px solid var(--blue)}
+.dev-icon{font-size:32px;line-height:1.2}
+.dev-name{font-size:14px;font-weight:600}
+.dev-sub{font-size:11px;color:var(--gray)}
+.dev-status{font-size:10px;padding:1px 6px;border-radius:4px;font-weight:600}
+.dev-online{background:rgba(52,199,89,.15);color:var(--green)}
+.dev-offline{background:var(--gray6);color:var(--gray)}
+.icon-pick{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:8px 0}
+.icon-pick button{font-size:22px;padding:8px 0;border-radius:8px;border:1.5px solid var(--gray5);background:var(--card);cursor:pointer}
+.icon-pick button.active{border-color:var(--blue);background:rgba(0,122,255,.08)}
 .hist-item{display:flex;align-items:center;padding:10px 16px;gap:10px}
 .hist-item+.hist-item{border-top:.5px solid var(--gray6)}
 .hist-info{flex:1;min-width:0}
@@ -152,8 +166,21 @@ select{background:var(--card);color:var(--text)}
 </div>
 </div>
 </div>
-<div id="pg-ac" class="pg active">
+<div id="pg-devices" class="pg active">
+<div class="pg-title">设备</div>
+<div id="dev-floor-list"></div>
+<div style="text-align:center;padding:8px">
+<button class="b b-or b-fw" id="dev-pair-btn" onclick="togglePair()">配对新设备</button>
+</div>
+</div>
+
+<div id="pg-ac" class="pg">
 <div class="pg-title">空调</div>
+<div id="ac-target-wrap" style="display:none;margin-bottom:10px">
+<select id="ac-target" onchange="saveTarget()">
+<option value="ALL">所有设备</option>
+</select>
+</div>
 <div class="cd"><div class="cd-h">品牌</div><div class="cd-b">
 <select id="ac-v">
 <optgroup label="常用">
@@ -332,7 +359,8 @@ select{background:var(--card);color:var(--text)}
 <div id="ota-msg" style="font-size:13px;margin-top:8px"></div>
 </div></div></div>
 <nav class="bar">
-<a class="active" onclick="go('ac')"><i>&#10052;&#65039;</i>空调</a>
+<a class="active" onclick="go('devices')"><i>&#127968;</i>设备</a>
+<a onclick="go('ac')"><i>&#10052;&#65039;</i>空调</a>
 <a onclick="go('learn')"><i>&#128225;</i>学习</a>
 <a onclick="go('remote')"><i>&#127903;</i>遥控</a>
 <a onclick="go('settings')"><i>&#9881;</i>设置</a>
@@ -349,10 +377,12 @@ function go(p){
 document.querySelectorAll('.pg').forEach(function(e){e.classList.remove('active')});
 document.querySelectorAll('nav.bar a').forEach(function(e){e.classList.remove('active')});
 $('pg-'+p).classList.add('active');
-var t=['ac','learn','remote','settings'];
+var t=['devices','ac','learn','remote','settings'];
 document.querySelectorAll('nav.bar a')[t.indexOf(p)].classList.add('active');
 if(p==='learn')startPoll();else stopPoll();
 if(p==='remote')renderRemote();
+if(p==='devices')startDevPoll();else stopDevPoll();
+if(p==='ac')loadAcTargets();
 }
 function segInit(id){
 var bs=$(id).querySelectorAll('button');
@@ -362,8 +392,9 @@ function segVal(id){return $(id).querySelector('.active').dataset.v}
 segInit('s-mode');segInit('s-fan');
 function tAdj(d){var e=$('t-val'),v=parseInt(e.textContent)+d;if(v<16)v=16;if(v>30)v=30;e.textContent=v;acCmd('On')}
 function acCmd(pwr){
+var tgt='ALL';var tw=$('ac-target');if(tw&&tw.value)tgt=tw.value;
 var p='vendor='+$('ac-v').value+'&power='+pwr+'&mode='+segVal('s-mode')+
-'&temp='+$('t-val').textContent+'&fan='+segVal('s-fan')+'&swing=Off';
+'&temp='+$('t-val').textContent+'&fan='+segVal('s-fan')+'&swing=Off&target='+tgt;
 fetch('/api/hvac',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p})
 .then(function(r){return r.json()}).then(function(d){toast(d.ok?'\u2713':'\u2717 失败')}).catch(function(){toast('\u2717 失败')});
 }
@@ -644,9 +675,114 @@ function loadSlaves(){
 }
 function togglePair(){
   fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
-    if(d.pairing){fetch('/api/pair/stop',{method:'POST'}).then(function(){loadSlaves()})}
-    else{toast('配对模式已开启');fetch('/api/pair/start',{method:'POST'}).then(function(){loadSlaves()})}
+    if(d.pairing){fetch('/api/pair/stop',{method:'POST'}).then(function(){loadDevices()})}
+    else{toast('配对模式已开启');fetch('/api/pair/start',{method:'POST'}).then(function(){loadDevices()})}
   });
+}
+var devPollTimer=null;
+var ICONS={'ac':'❄️','bed':'🛏️','book':'📚','tv':'📺','light':'💡','kitchen':'🍳','door':'🚪','star':'⭐'};
+function startDevPoll(){if(devPollTimer)return;devPollTimer=setInterval(loadDevices,3000);loadDevices()}
+function stopDevPoll(){if(devPollTimer){clearInterval(devPollTimer);devPollTimer=null}}
+function loadDevices(){
+  fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
+    var el=$('dev-floor-list');if(!el)return;
+    var floors={};
+    d.slaves.forEach(function(s){
+      var fl=s.floor||'未分组';
+      if(!floors[fl])floors[fl]=[];
+      floors[fl].push(s);
+    });
+    var h='';
+    fetch('/api/system/info').then(function(r2){return r2.json()}).then(function(info){
+      h+='<div class="floor-h">'+(info.mode==='ap'?'本机（主机）':'当前设备')+'</div>';
+      h+='<div class="dev-grid"><div class="dev-card master"><div class="dev-icon">'+(ICONS[info.deviceIcon||'ac']||'📡')+'</div>';
+      h+='<div class="dev-name">'+(info.deviceName||'主机')+'</div>';
+      h+='<div class="dev-sub">'+(info.apMac||info.mac||'')+'</div>';
+      h+='<div class="dev-status dev-online">主机</div></div></div>';
+      Object.keys(floors).forEach(function(fl){
+        h+='<div class="floor-h">'+fl+'</div><div class="dev-grid">';
+        floors[fl].forEach(function(s){
+          var ic=ICONS[s.icon]||'📦';
+          var on=(s.ago||0)<30000;
+          h+='<div class="dev-card" onclick="editDevice(\''+s.id+'\')">';
+          h+='<div class="dev-icon">'+ic+'</div>';
+          h+='<div class="dev-name">'+(s.name||s.id)+'</div>';
+          h+='<div class="dev-sub">'+s.ip+'</div>';
+          h+='<div class="dev-status '+(on?'dev-online':'dev-offline')+'">'+(on?'在线':'离线')+'</div>';
+          h+='</div>';
+        });
+        h+='</div>';
+      });
+      el.innerHTML=h;
+      var pb=$('dev-pair-btn');
+      if(pb){if(d.pairing){pb.textContent='配对中 ('+d.pairingLeft+'s)...';pb.classList.add('pair-pulse')}else{pb.textContent='配对新设备';pb.classList.remove('pair-pulse')}}
+    });
+  }).catch(function(){});
+}
+function loadAcTargets(){
+  fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
+    var sel=$('ac-target');if(!sel)return;
+    var cur=sel.value;
+    var h='<option value="ALL">所有设备</option>';
+    d.slaves.forEach(function(s){
+      var nm=s.name||s.id;
+      h+='<option value="'+s.id+'">'+(ICONS[s.icon]||'📦')+' '+nm+'</option>';
+    });
+    sel.innerHTML=h;
+    if(cur)sel.value=cur;
+    $('ac-target-wrap').style.display=d.slaves.length>0?'':'none';
+  }).catch(function(){});
+}
+function saveTarget(){localStorage.setItem('ir_target',$('ac-target').value)}
+var st=localStorage.getItem('ir_target');if(st)setTimeout(function(){var s=$('ac-target');if(s)s.value=st},500);
+var editDevId='';
+function editDevice(id){
+  editDevId=id;
+  fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
+    var dev=d.slaves.find(function(s){return s.id===id});if(!dev)return;
+    var icons=Object.keys(ICONS);
+    var icHtml=icons.map(function(k){return '<button data-ic="'+k+'" onclick="pickIcon(\''+k+'\')" class="'+(dev.icon===k?'active':'')+'">'+ICONS[k]+'</button>'}).join('');
+    $('rename-modal').innerHTML='<div class="modal"><h3>编辑设备</h3>'+
+    '<div style="font-size:13px;color:var(--gray);margin-bottom:4px">'+dev.mac+'<br>'+dev.ip+'</div>'+
+    '<div class="icon-pick" id="icon-pick">'+icHtml+'</div>'+
+    '<input type="text" id="dev-name-input" placeholder="设备名称" value="'+(dev.name||'')+'">'+
+    '<input type="text" id="dev-floor-input" placeholder="楼层/分组（如 3楼）" value="'+(dev.floor||'')+'">'+
+    '<div style="display:flex;gap:8px;margin-top:10px">'+
+    '<button class="b b-bl" style="flex:1" onclick="saveDevConfig()">保存</button>'+
+    '<button class="b b-gy" onclick="closeRename()">取消</button></div>'+
+    '<div style="margin-top:10px;border-top:.5px solid var(--gray6);padding-top:10px">'+
+    '<button class="b b-or b-fw" style="font-size:14px" onclick="rebootDev()">远程重启此设备</button>'+
+    '<button class="b b-rd b-fw" style="font-size:14px;margin-top:6px" onclick="disconnectDev()">断开此设备</button>'+
+    '</div></div>';
+    $('rename-modal').classList.add('show');
+  });
+}
+function pickIcon(ic){
+  document.querySelectorAll('#icon-pick button').forEach(function(b){b.classList.toggle('active',b.dataset.ic===ic)});
+}
+function saveDevConfig(){
+  var nm=$('dev-name-input').value.trim();
+  var fl=$('dev-floor-input').value.trim();
+  var ic='';document.querySelectorAll('#icon-pick button.active').forEach(function(b){ic=b.dataset.ic});
+  if(!ic)ic='star';
+  var body='id='+editDevId+'&cmd=name&val='+encodeURIComponent(nm);
+  fetch('/api/slave/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(){
+    return fetch('/api/slave/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+editDevId+'&cmd=icon&val='+ic});
+  }).then(function(){
+    return fetch('/api/slave/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+editDevId+'&cmd=floor&val='+encodeURIComponent(fl)});
+  }).then(function(){
+    toast('已发送配置');closeRename();loadDevices();
+  }).catch(function(){toast('失败')});
+}
+function rebootDev(){
+  if(!confirm('确定远程重启此设备？'))return;
+  fetch('/api/slave/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+editDevId+'&cmd=reboot'})
+  .then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启指令已发送':'失败')});
+}
+function disconnectDev(){
+  if(!confirm('确定断开此设备？它将切换为独立主机模式。'))return;
+  fetch('/api/slave/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+editDevId+'&cmd=disconnect'})
+  .then(function(r){return r.json()}).then(function(d){toast(d.ok?'断开指令已发送':'失败');closeRename()});
 }
 </script>
 </body></html>)rawliteral";

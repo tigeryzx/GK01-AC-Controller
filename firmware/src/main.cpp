@@ -85,12 +85,28 @@ struct SlaveInfo {
   char mac[18] = "";
   uint32_t ip = 0;
   unsigned long lastSeen = 0;
+  char name[33] = "";
+  char icon[12] = "ac";
+  char floor[33] = "";
 };
 SlaveInfo slaves[MAX_SLAVES];
 
 bool pairingMode = false;
 unsigned long pairingUntil = 0;
 #define PAIRING_DURATION_MS 60000
+
+String slaveIdFromMac(const char* mac) {
+  String id = "";
+  for (int i = 12; i < 17; i += 3) {
+    if (mac[i]) id += (char)toupper(mac[i]);
+    if (mac[i+1]) id += (char)toupper(mac[i+1]);
+  }
+  return id;
+}
+
+String mySlaveId() {
+  return slaveIdFromMac(WiFi.macAddress().c_str());
+}
 
 const char* getApSsid() {
   if (strlen(cfg.ap_ssid)) return cfg.ap_ssid;
@@ -122,6 +138,8 @@ bool ledBlinking = false;
 // ===== 重连计时器 =====
 unsigned long lastReconnectAttempt = 0;
 unsigned long lastMqttReconnect = 0;
+unsigned long lastHelloSent = 0;
+#define HELLO_INTERVAL_MS 30000
 
 // ===== GPIO13 按键（与黄色 LED 复用）=====
 unsigned long btnPressStart = 0;
@@ -561,9 +579,11 @@ void handleHvac() {
   }
 
   if (deviceMode == MODE_AP_MASTER) {
-    char msg[256];
-    snprintf(msg, sizeof(msg), "HVAC:%s,%s,%s,%d,%s,%s",
-      vendor.c_str(), power ? "1" : "0", mode.c_str(), temp,
+    String target = server.arg("target");
+    if (target.length() == 0) target = "ALL";
+    char msg[280];
+    snprintf(msg, sizeof(msg), "HVAC:%s:%s,%s,%s,%d,%s,%s",
+      target.c_str(), vendor.c_str(), power ? "1" : "0", mode.c_str(), temp,
       fan.c_str(), swing.c_str());
     broadcastUdp(msg);
   }
@@ -759,7 +779,9 @@ void handleSystemInfo() {
   json += "\"flashSize\":" + String(ESP.getFlashChipSize()) + ",";
   json += "\"mode\":\"" + jsonEscape(String(modeString())) + "\",";
   json += "\"forceMode\":" + String(cfg.force_mode) + ",";
-  json += "\"uptime\":" + String(millis());
+  json += "\"uptime\":" + String(millis()) + ",";
+  json += "\"deviceName\":\"" + jsonEscape(String(cfg.device_name)) + "\",";
+  json += "\"deviceIcon\":\"" + jsonEscape(String(cfg.device_icon)) + "\"";
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -809,7 +831,11 @@ void handleSlaves() {
     if (slaves[i].mac[0] != '\0' && (now - slaves[i].lastSeen) < 30000) {
       if (!first) json += ",";
       json += "{\"mac\":\"" + String(slaves[i].mac) + "\",";
+      json += "\"id\":\"" + slaveIdFromMac(slaves[i].mac) + "\",";
       json += "\"ip\":\"" + IPAddress(slaves[i].ip).toString() + "\",";
+      json += "\"name\":\"" + jsonEscape(String(slaves[i].name)) + "\",";
+      json += "\"icon\":\"" + jsonEscape(String(slaves[i].icon)) + "\",";
+      json += "\"floor\":\"" + jsonEscape(String(slaves[i].floor)) + "\",";
       json += "\"ago\":" + String(now - slaves[i].lastSeen);
       json += "}";
       first = false;
@@ -819,6 +845,55 @@ void handleSlaves() {
   if (pairingMode) json += ",\"pairingLeft\":" + String((pairingUntil > now) ? (pairingUntil - now) / 1000 : 0);
   json += "}";
   server.send(200, "application/json", json);
+}
+
+void handleSlaveConfig() {
+  String targetId = server.arg("id");
+  String cmd = server.arg("cmd");
+  String val = server.arg("val");
+  if (targetId.length() == 0) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing_id\"}");
+    return;
+  }
+  IPAddress targetIp(0,0,0,0);
+  for (int i = 0; i < MAX_SLAVES; i++) {
+    if (slaveIdFromMac(slaves[i].mac) == targetId) {
+      targetIp = slaves[i].ip;
+      break;
+    }
+  }
+  if (targetIp == IPAddress(0,0,0,0)) {
+    server.send(404, "application/json", "{\"ok\":false,\"error\":\"slave_not_found\"}");
+    return;
+  }
+  String msg = "CONFIG:" + targetId + ":" + cmd;
+  if (val.length() > 0) msg += "=" + val;
+  udp.beginPacket(targetIp, UDP_PORT);
+  udp.print(msg);
+  udp.endPacket();
+  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"sent\"}");
+}
+
+void handleDeviceConfig() {
+  if (server.method() == HTTP_GET) {
+    String json = "{";
+    json += "\"name\":\"" + jsonEscape(String(cfg.device_name)) + "\",";
+    json += "\"icon\":\"" + jsonEscape(String(cfg.device_icon)) + "\",";
+    json += "\"floor\":\"" + jsonEscape(String(cfg.device_floor)) + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+  String name = server.arg("name");
+  String icon = server.arg("icon");
+  String floor = server.arg("floor");
+  if (name.length() > 0) { strncpy(cfg.device_name, name.c_str(), 32); cfg.device_name[32] = '\0'; }
+  if (icon.length() > 0) { strncpy(cfg.device_icon, icon.c_str(), 11); cfg.device_icon[11] = '\0'; }
+  if (floor.length() > 0) { strncpy(cfg.device_floor, floor.c_str(), 32); cfg.device_floor[32] = '\0'; }
+  saveConfig();
+  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
+  delay(500);
+  ESP.restart();
 }
 
 void handlePairStart() {
@@ -862,22 +937,42 @@ void handleMasterUdpReceive() {
   String msg = String(buf);
   IPAddress remoteIp = udp.remoteIP();
 
-  if (msg.startsWith("JOIN:")) {
-    String mac = msg.substring(5);
+  if (msg.startsWith("HELLO:")) {
+    int p1 = msg.indexOf(':', 6);
+    int p2 = msg.indexOf(':', p1 + 1);
+    int p3 = msg.indexOf(':', p2 + 1);
+    String mac = (p1 > 0) ? msg.substring(6, p1) : msg.substring(5);
     mac.trim();
-    Serial.printf("[MASTER] JOIN from %s @ %s\n", mac.c_str(), remoteIp.toString().c_str());
+    String name = (p1 > 0 && p2 > 0) ? msg.substring(p1 + 1, p2) : "";
+    String icon = (p2 > 0 && p3 > 0) ? msg.substring(p2 + 1, p3) : "ac";
+    String floor = (p3 > 0) ? msg.substring(p3 + 1) : "";
+    name.trim(); icon.trim(); floor.trim();
 
     bool alreadyKnown = false;
+    int slot = -1;
     for (int i = 0; i < MAX_SLAVES; i++) {
-      if (strcmp(slaves[i].mac, mac.c_str()) == 0) { alreadyKnown = true; break; }
+      if (strcmp(slaves[i].mac, mac.c_str()) == 0) { alreadyKnown = true; slot = i; break; }
+    }
+    if (!alreadyKnown && (pairingMode || true)) {
+      for (int i = 0; i < MAX_SLAVES; i++) {
+        if (slaves[i].mac[0] == '\0') { slot = i; break; }
+      }
+    }
+    if (slot >= 0) {
+      strncpy(slaves[slot].mac, mac.c_str(), 17);
+      slaves[slot].mac[17] = '\0';
+      slaves[slot].ip = remoteIp;
+      slaves[slot].lastSeen = millis();
+      if (name.length() > 0) { strncpy(slaves[slot].name, name.c_str(), 32); slaves[slot].name[32] = '\0'; }
+      if (icon.length() > 0) { strncpy(slaves[slot].icon, icon.c_str(), 11); slaves[slot].icon[11] = '\0'; }
+      if (floor.length() > 0) { strncpy(slaves[slot].floor, floor.c_str(), 32); slaves[slot].floor[32] = '\0'; }
     }
 
-    if (pairingMode || alreadyKnown) {
-      udp.beginPacket(remoteIp, UDP_PORT);
-      udp.print("ACK:");
-      udp.endPacket();
-      Serial.printf("[MASTER] ACK sent to %s\n", remoteIp.toString().c_str());
-    }
+    udp.beginPacket(remoteIp, UDP_PORT);
+    udp.print("ACK:");
+    udp.endPacket();
+  } else if (msg.startsWith("CONFIGACK:")) {
+    Serial.printf("[MASTER] CONFIGACK: %s\n", msg.substring(10).c_str());
   }
 }
 
@@ -1111,6 +1206,8 @@ void registerApiRoutes() {
   server.on("/api/pair/start", HTTP_POST, handlePairStart);
   server.on("/api/pair/stop", HTTP_POST, handlePairStop);
   server.on("/api/mode/force", HTTP_POST, handleForceMode);
+  server.on("/api/slave/config", HTTP_POST, handleSlaveConfig);
+  server.on("/api/device/config", HTTP_ANY, handleDeviceConfig);
 }
 
 // ===== MQTT =====
@@ -1329,12 +1426,21 @@ void checkButton() {
 }
 
 void slaveLoop() {
-  int packetSize = udp.parsePacket();
-  if (!packetSize) return;
+  if (millis() - lastHelloSent > HELLO_INTERVAL_MS) {
+    lastHelloSent = millis();
+    String hello = "HELLO:" + WiFi.macAddress() + ":" + String(cfg.device_name) + ":" + String(cfg.device_icon) + ":" + String(cfg.device_floor);
+    udp.beginPacket(AP_IP_STR, UDP_PORT);
+    udp.print(hello);
+    udp.endPacket();
+  }
 
+  int packetSize = udp.parsePacket();
+  if (!packetSize) goto slaveCheckWifi;
+
+  {
   char buf[1024];
   int len = udp.read(buf, sizeof(buf) - 1);
-  if (len <= 0) return;
+  if (len <= 0) goto slaveCheckWifi;
   buf[len] = '\0';
 
   String msg = String(buf);
@@ -1346,7 +1452,63 @@ void slaveLoop() {
       slaveExecRaw(msg.substring(firstColon + 1));
     }
   } else if (msg.startsWith("HVAC:")) {
-    slaveExecHvac(msg.substring(5));
+    String payload = msg.substring(5);
+    int colon = payload.indexOf(':');
+    if (colon > 0) {
+      String target = payload.substring(0, colon);
+      String hvacData = payload.substring(colon + 1);
+      if (target == "ALL" || target == mySlaveId()) {
+        slaveExecHvac(hvacData);
+      }
+    } else {
+      slaveExecHvac(payload);
+    }
+  } else if (msg.startsWith("CONFIG:")) {
+    String payload = msg.substring(7);
+    int colon = payload.indexOf(':');
+    if (colon > 0) {
+      String target = payload.substring(0, colon);
+      String cmd = payload.substring(colon + 1);
+      if (target == mySlaveId()) {
+        IPAddress masterIp = udp.remoteIP();
+        String ack = "CONFIGACK:" + mySlaveId() + ":";
+        int eq = cmd.indexOf('=');
+        if (eq > 0) {
+          String key = cmd.substring(0, eq);
+          String val = cmd.substring(eq + 1);
+          if (key == "name") { strncpy(cfg.device_name, val.c_str(), 32); cfg.device_name[32] = '\0'; }
+          else if (key == "icon") { strncpy(cfg.device_icon, val.c_str(), 11); cfg.device_icon[11] = '\0'; }
+          else if (key == "floor") { strncpy(cfg.device_floor, val.c_str(), 32); cfg.device_floor[32] = '\0'; }
+          else if (key == "ap_ssid") { strncpy(cfg.ap_ssid, val.c_str(), 32); cfg.ap_ssid[32] = '\0'; }
+          else if (key == "ap_pass") { strncpy(cfg.ap_pass, val.c_str(), 32); cfg.ap_pass[32] = '\0'; }
+          saveConfig();
+          ack += "ok";
+        } else if (cmd == "reboot") {
+          ack += "ok";
+          udp.beginPacket(masterIp, UDP_PORT);
+          udp.print(ack);
+          udp.endPacket();
+          delay(100);
+          ESP.restart();
+        } else if (cmd == "disconnect") {
+          ack += "ok";
+          udp.beginPacket(masterIp, UDP_PORT);
+          udp.print(ack);
+          udp.endPacket();
+          delay(100);
+          WiFi.disconnect();
+          deviceMode = MODE_AP_MASTER;
+          delay(500);
+          ESP.restart();
+        } else {
+          ack += "unknown_cmd";
+        }
+        udp.beginPacket(masterIp, UDP_PORT);
+        udp.print(ack);
+        udp.endPacket();
+        Serial.printf("[SLAVE] CONFIG %s → %s\n", cmd.c_str(), ack.substring(ack.lastIndexOf(':') + 1).c_str());
+      }
+    }
   } else if (msg.startsWith("ACK:")) {
     String bssid = WiFi.BSSIDstr();
     if (bssid.length() > 0 && strcmp(cfg.paired_master_bssid, bssid.c_str()) != 0) {
@@ -1356,7 +1518,9 @@ void slaveLoop() {
       Serial.printf("[SLAVE] Paired with master BSSID: %s\n", bssid.c_str());
     }
   }
+  }
 
+slaveCheckWifi:
   if (WiFi.status() != WL_CONNECTED) {
     LED_OFF(LED_BLUE);
     if (millis() - lastReconnectAttempt > 5000) {
@@ -1509,10 +1673,11 @@ void setup() {
       irRecv.enableIRIn();
 
       delay(200);
+      String hello = "HELLO:" + WiFi.macAddress() + ":" + String(cfg.device_name) + ":" + String(cfg.device_icon) + ":" + String(cfg.device_floor);
       udp.beginPacket(AP_IP_STR, UDP_PORT);
-      udp.print("JOIN:");
-      udp.print(WiFi.macAddress());
+      udp.print(hello);
       udp.endPacket();
+      lastHelloSent = millis();
 
       LED_ON(LED_YELLOW);
       LED_ON(LED_BLUE);
