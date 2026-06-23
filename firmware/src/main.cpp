@@ -1457,7 +1457,7 @@ void slaveLoop() {
     if (colon > 0) {
       String target = payload.substring(0, colon);
       String hvacData = payload.substring(colon + 1);
-      if (target == "ALL" || target == mySlaveId()) {
+      if (target == "ALL" || ("," + target + ",").indexOf("," + mySlaveId() + ",") >= 0) {
         slaveExecHvac(hvacData);
       }
     } else {

@@ -111,6 +111,9 @@ font-size:12px;word-break:break-all;max-height:80px;overflow-y:auto;margin:8px 0
 .icon-pick{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:8px 0}
 .icon-pick button{font-size:22px;padding:8px 0;border-radius:8px;border:1.5px solid var(--gray5);background:var(--card);cursor:pointer}
 .icon-pick button.active{border-color:var(--blue);background:rgba(0,122,255,.08)}
+.chip{padding:6px 12px;border-radius:16px;border:1.5px solid var(--gray5);background:var(--card);font-size:13px;font-weight:500;cursor:pointer;transition:all .12s}
+.chip.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.chip:active{transform:scale(.95)}
 .hist-item{display:flex;align-items:center;padding:10px 16px;gap:10px}
 .hist-item+.hist-item{border-top:.5px solid var(--gray6)}
 .hist-info{flex:1;min-width:0}
@@ -177,9 +180,8 @@ select{background:var(--card);color:var(--text)}
 <div id="pg-ac" class="pg">
 <div class="pg-title">空调</div>
 <div id="ac-target-wrap" style="display:none;margin-bottom:10px">
-<select id="ac-target" onchange="saveTarget()">
-<option value="ALL">所有设备</option>
-</select>
+<div style="font-size:12px;font-weight:700;color:var(--gray);letter-spacing:.5px;margin-bottom:4px">控制目标</div>
+<div id="ac-target-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
 </div>
 <div class="cd"><div class="cd-h">品牌</div><div class="cd-b">
 <select id="ac-v">
@@ -392,11 +394,23 @@ function segVal(id){return $(id).querySelector('.active').dataset.v}
 segInit('s-mode');segInit('s-fan');
 function tAdj(d){var e=$('t-val'),v=parseInt(e.textContent)+d;if(v<16)v=16;if(v>30)v=30;e.textContent=v;acCmd('On')}
 function acCmd(pwr){
-var tgt='ALL';var tw=$('ac-target');if(tw&&tw.value)tgt=tw.value;
+var tgt=getSelectedTargets();
 var p='vendor='+$('ac-v').value+'&power='+pwr+'&mode='+segVal('s-mode')+
-'&temp='+$('t-val').textContent+'&fan='+segVal('s-fan')+'&swing=Off&target='+tgt;
+'&temp='+$('t-val').textContent+'&fan='+segVal('s-fan')+'&swing=Off&target='+encodeURIComponent(tgt);
 fetch('/api/hvac',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p})
 .then(function(r){return r.json()}).then(function(d){toast(d.ok?'\u2713':'\u2717 失败')}).catch(function(){toast('\u2717 失败')});
+}
+function getSelectedTargets(){
+  var chips=document.querySelectorAll('#ac-target-chips .chip.active');
+  if(chips.length===0)return 'ALL';
+  var ids=[];chips.forEach(function(c){ids.push(c.dataset.id)});
+  return ids.join(',');
+}
+function setTargetAll(){
+  document.querySelectorAll('#ac-target-chips .chip').forEach(function(c){
+    c.classList.toggle('active',c.dataset.id==='ALL');
+  });
+  localStorage.setItem('ir_target','ALL');
 }
 var sv_=localStorage.getItem('ir_ac_v');if(sv_)$('ac-v').value=sv_;
 $('ac-v').onchange=function(){localStorage.setItem('ir_ac_v',this.value)};
@@ -721,20 +735,31 @@ function loadDevices(){
 }
 function loadAcTargets(){
   fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
-    var sel=$('ac-target');if(!sel)return;
-    var cur=sel.value;
-    var h='<option value="ALL">所有设备</option>';
+    var wrap=$('ac-target-chips');if(!wrap)return;
+    var saved=localStorage.getItem('ir_target')||'ALL';
+    var h='<button class="chip '+(saved==='ALL'?'active':'')+'" data-id="ALL" onclick="toggleChip(this)">所有设备</button>';
     d.slaves.forEach(function(s){
       var nm=s.name||s.id;
-      h+='<option value="'+s.id+'">'+(ICONS[s.icon]||'📦')+' '+nm+'</option>';
+      var sel=saved!=='ALL'&&saved.indexOf(s.id)>=0?'active':'';
+      h+='<button class="chip '+sel+'" data-id="'+s.id+'" onclick="toggleChip(this)">'+(ICONS[s.icon]||'📦')+' '+nm+'</button>';
     });
-    sel.innerHTML=h;
-    if(cur)sel.value=cur;
+    wrap.innerHTML=h;
     $('ac-target-wrap').style.display=d.slaves.length>0?'':'none';
   }).catch(function(){});
 }
-function saveTarget(){localStorage.setItem('ir_target',$('ac-target').value)}
-var st=localStorage.getItem('ir_target');if(st)setTimeout(function(){var s=$('ac-target');if(s)s.value=st},500);
+function toggleChip(el){
+  if(el.dataset.id==='ALL'){
+    document.querySelectorAll('#ac-target-chips .chip').forEach(function(c){c.classList.toggle('active',c===el)});
+  }else{
+    el.classList.toggle('active');
+    var allChip=document.querySelector('#ac-target-chips .chip[data-id="ALL"]');
+    if(allChip&&el.classList.contains('active'))allChip.classList.remove('active');
+    var anySel=document.querySelectorAll('#ac-target-chips .chip.active').length;
+    if(anySel===0&&allChip)allChip.classList.add('active');
+  }
+  localStorage.setItem('ir_target',getSelectedTargets());
+}
+var st=localStorage.getItem('ir_target');
 var editDevId='';
 function editDevice(id){
   editDevId=id;
