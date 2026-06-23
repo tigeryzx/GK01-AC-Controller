@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+extern "C" {
+#include <user_interface.h>
+}
 #include "rboot.h"
 #include <WiFiUdp.h>
 #include <DNSServer.h>
@@ -51,9 +54,14 @@ WiFiClient mqttNet;
 PubSubClient mqtt(mqttNet);
 
 // ===== 配置（LittleFS 持久化）=====
+#define FORCE_MODE_AUTO   0
+#define FORCE_MODE_AP     1
+#define FORCE_MODE_SLAVE  2
+#define FORCE_MODE_HOME   3
+
 struct Config {
-  char ap_ssid[33] = "";       // AP 热点名称（空=默认 AP_SSID）
-  char ap_pass[33] = "";       // AP 热点密码（空=默认 AP_PASS）
+  char ap_ssid[33] = "";
+  char ap_pass[33] = "";
   char sta_ssid[64] = "";
   char sta_pass[64] = "";
   char mqtt_host[64] = "";
@@ -61,11 +69,38 @@ struct Config {
   char mqtt_user[32] = "";
   char mqtt_pass[32] = "";
   char mqtt_topic[32] = "ir_ac";
+  uint8_t force_mode = FORCE_MODE_AUTO;
+  char paired_master_bssid[18] = "";
 } cfg;
 
-// AP 配置辅助函数（空值回退到默认宏）
-const char* getApSsid() { return strlen(cfg.ap_ssid) ? cfg.ap_ssid : AP_SSID; }
+#define MAX_SLAVES 4
+struct SlaveInfo {
+  char mac[18] = "";
+  uint32_t ip = 0;
+  unsigned long lastSeen = 0;
+};
+SlaveInfo slaves[MAX_SLAVES];
+
+bool pairingMode = false;
+unsigned long pairingUntil = 0;
+#define PAIRING_DURATION_MS 60000
+
+const char* getApSsid() {
+  if (strlen(cfg.ap_ssid)) return cfg.ap_ssid;
+  static char defaultSsid[16];
+  snprintf(defaultSsid, sizeof(defaultSsid), "IR-AC-%04X", (uint16_t)(ESP.getChipId() & 0xFFFF));
+  return defaultSsid;
+}
 const char* getApPass() { return strlen(cfg.ap_pass) ? cfg.ap_pass : AP_PASS; }
+
+const char* modeString() {
+  switch (deviceMode) {
+    case MODE_AP_MASTER: return "ap";
+    case MODE_STA_SLAVE: return "slave";
+    case MODE_STA_HOME: return "home";
+    default: return "unknown";
+  }
+}
 
 // ===== 捕获状态 =====
 String capturedRaw;
@@ -372,6 +407,8 @@ bool loadConfig() {
     else if (key == "mqtt_user") { strncpy(cfg.mqtt_user, val.c_str(), sizeof(cfg.mqtt_user) - 1); cfg.mqtt_user[sizeof(cfg.mqtt_user) - 1] = '\0'; }
     else if (key == "mqtt_pass") { strncpy(cfg.mqtt_pass, val.c_str(), sizeof(cfg.mqtt_pass) - 1); cfg.mqtt_pass[sizeof(cfg.mqtt_pass) - 1] = '\0'; }
     else if (key == "mqtt_topic") { strncpy(cfg.mqtt_topic, val.c_str(), sizeof(cfg.mqtt_topic) - 1); cfg.mqtt_topic[sizeof(cfg.mqtt_topic) - 1] = '\0'; }
+    else if (key == "force_mode") cfg.force_mode = (uint8_t)val.toInt();
+    else if (key == "paired_master_bssid") { strncpy(cfg.paired_master_bssid, val.c_str(), sizeof(cfg.paired_master_bssid) - 1); cfg.paired_master_bssid[sizeof(cfg.paired_master_bssid) - 1] = '\0'; }
   }
   f.close();
   Serial.printf("[CFG] ap=%s sta=%s mqtt=%s:%d topic=%s\n",
@@ -391,6 +428,8 @@ void saveConfig() {
   f.printf("mqtt_user=%s\n", cfg.mqtt_user);
   f.printf("mqtt_pass=%s\n", cfg.mqtt_pass);
   f.printf("mqtt_topic=%s\n", cfg.mqtt_topic);
+  f.printf("force_mode=%d\n", cfg.force_mode);
+  f.printf("paired_master_bssid=%s\n", cfg.paired_master_bssid);
   f.close();
   Serial.println("[CFG] saved");
 }
@@ -670,6 +709,136 @@ void handleFactoryReset() {
   ESP.restart();
 }
 
+void handleSystemInfo() {
+  String json = "{";
+  json += "\"mac\":\"" + WiFi.macAddress() + "\",";
+  json += "\"apMac\":\"" + WiFi.softAPmacAddress() + "\",";
+  json += "\"chipId\":\"" + String(ESP.getChipId(), HEX) + "\",";
+  json += "\"flashSize\":" + String(ESP.getFlashChipSize()) + ",";
+  json += "\"mode\":\"" + String(modeString()) + "\",";
+  json += "\"forceMode\":" + String(cfg.force_mode) + ",";
+  json += "\"uptime\":" + String(millis());
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void refreshSlaveListFromSDK() {
+  struct station_info *stat_info = wifi_softap_get_station_info();
+  while (stat_info) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             stat_info->bssid[0], stat_info->bssid[1], stat_info->bssid[2],
+             stat_info->bssid[3], stat_info->bssid[4], stat_info->bssid[5]);
+    bool found = false;
+    for (int i = 0; i < MAX_SLAVES; i++) {
+      if (strcmp(slaves[i].mac, mac) == 0) {
+        slaves[i].ip = stat_info->ip.addr;
+        slaves[i].lastSeen = millis();
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      for (int i = 0; i < MAX_SLAVES; i++) {
+        if (slaves[i].mac[0] == '\0') {
+          strncpy(slaves[i].mac, mac, 17);
+          slaves[i].mac[17] = '\0';
+          slaves[i].ip = stat_info->ip.addr;
+          slaves[i].lastSeen = millis();
+          break;
+        }
+      }
+    }
+    stat_info = STAILQ_NEXT(stat_info, next);
+  }
+  wifi_softap_free_station_info();
+}
+
+void handleSlaves() {
+  if (deviceMode != MODE_AP_MASTER) {
+    server.send(200, "application/json", "{\"slaves\":[]}");
+    return;
+  }
+  refreshSlaveListFromSDK();
+  unsigned long now = millis();
+  String json = "{\"slaves\":[";
+  bool first = true;
+  for (int i = 0; i < MAX_SLAVES; i++) {
+    if (slaves[i].mac[0] != '\0' && (now - slaves[i].lastSeen) < 30000) {
+      if (!first) json += ",";
+      json += "{\"mac\":\"" + String(slaves[i].mac) + "\",";
+      json += "\"ip\":\"" + IPAddress(slaves[i].ip).toString() + "\",";
+      json += "\"ago\":" + String(now - slaves[i].lastSeen);
+      json += "}";
+      first = false;
+    }
+  }
+  json += "],\"pairing\":" + String(pairingMode ? 1 : 0);
+  if (pairingMode) json += ",\"pairingLeft\":" + String((pairingUntil > now) ? (pairingUntil - now) / 1000 : 0);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handlePairStart() {
+  pairingMode = true;
+  pairingUntil = millis() + PAIRING_DURATION_MS;
+  Serial.println("[PAIR] Pairing mode enabled for 60s");
+  server.send(200, "application/json", "{\"ok\":true,\"duration\":60}");
+}
+
+void handlePairStop() {
+  pairingMode = false;
+  Serial.println("[PAIR] Pairing mode stopped");
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleForceMode() {
+  String mode = server.arg("mode");
+  uint8_t newMode = FORCE_MODE_AUTO;
+  if (mode == "ap") newMode = FORCE_MODE_AP;
+  else if (mode == "slave") newMode = FORCE_MODE_SLAVE;
+  else if (mode == "home") newMode = FORCE_MODE_HOME;
+  else if (mode == "auto") newMode = FORCE_MODE_AUTO;
+  else {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_mode\"}");
+    return;
+  }
+  cfg.force_mode = newMode;
+  saveConfig();
+  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
+  delay(500);
+  ESP.restart();
+}
+
+void handleMasterUdpReceive() {
+  int packetSize = udp.parsePacket();
+  if (!packetSize) return;
+  char buf[256];
+  int len = udp.read(buf, sizeof(buf) - 1);
+  if (len <= 0) return;
+  buf[len] = '\0';
+  String msg = String(buf);
+  IPAddress remoteIp = udp.remoteIP();
+
+  if (msg.startsWith("JOIN:")) {
+    String mac = msg.substring(5);
+    mac.trim();
+    Serial.printf("[MASTER] JOIN from %s @ %s\n", mac.c_str(), remoteIp.toString().c_str());
+
+    bool alreadyKnown = false;
+    for (int i = 0; i < MAX_SLAVES; i++) {
+      if (strcmp(slaves[i].mac, mac.c_str()) == 0) { alreadyKnown = true; break; }
+    }
+
+    if (pairingMode || alreadyKnown) {
+      udp.beginPacket(remoteIp, UDP_PORT);
+      udp.print("ACK:");
+      udp.endPacket();
+      Serial.printf("[MASTER] ACK sent to %s\n", remoteIp.toString().c_str());
+    }
+  }
+}
+
 void handleMqttConfig() {
   if (server.method() == HTTP_GET) {
     String json = "{";
@@ -894,6 +1063,11 @@ void registerApiRoutes() {
   server.on("/api/ap/config", HTTP_ANY, handleApConfig);
   server.on("/api/factory/reset", HTTP_POST, handleFactoryReset);
   server.on("/api/sensor", HTTP_GET, handleSensorStatus);
+  server.on("/api/system/info", HTTP_GET, handleSystemInfo);
+  server.on("/api/slaves", HTTP_GET, handleSlaves);
+  server.on("/api/pair/start", HTTP_POST, handlePairStart);
+  server.on("/api/pair/stop", HTTP_POST, handlePairStop);
+  server.on("/api/mode/force", HTTP_POST, handleForceMode);
 }
 
 // ===== MQTT =====
@@ -1183,10 +1357,13 @@ void setup() {
 
   // ===== 加载配置 =====
   bool hasSTA = loadConfig();
-  Serial.printf("[BOOT] STA config: %s\n", hasSTA ? cfg.sta_ssid : "(none)");
+  Serial.printf("[BOOT] STA config: %s force_mode=%d\n", hasSTA ? cfg.sta_ssid : "(none)", cfg.force_mode);
 
-  // ===== 优先尝试 STA Home 模式 =====
-  if (hasSTA) {
+  bool skipHome = (cfg.force_mode == FORCE_MODE_AP || cfg.force_mode == FORCE_MODE_SLAVE);
+  bool skipScan = (cfg.force_mode == FORCE_MODE_AP || cfg.force_mode == FORCE_MODE_HOME);
+  bool allowMasterFallback = (cfg.force_mode == FORCE_MODE_AUTO || cfg.force_mode == FORCE_MODE_AP);
+
+  if (hasSTA && !skipHome) {
     Serial.printf("[STA] Connecting to %s...\n", cfg.sta_ssid);
     WiFi.mode(WIFI_STA);
     WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
@@ -1225,7 +1402,7 @@ void setup() {
   // ===== OTA 健康检查（无 STA 配置或 STA 连接失败） =====
   checkOTARollback();
 
-  // ===== 扫描 IR-AC → 从机或主机 =====
+  if (!skipScan) {
   Serial.println("[BOOT] Scanning WiFi...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -1242,15 +1419,20 @@ void setup() {
       break;
     }
   }
-  if (!foundMaster && strcmp(targetSsid, AP_SSID) != 0) {
+  if (!foundMaster && strlen(cfg.ap_ssid) == 0) {
+    int bestRssi = -1000;
+    String bestSsid = "";
     for (int i = 0; i < n; i++) {
-      if (WiFi.SSID(i) == AP_SSID) {
-        foundMaster = true;
-        targetSsid = AP_SSID;
-        targetPass = AP_PASS;
-        Serial.printf("[BOOT] Fallback to default AP: %s\n", AP_SSID);
-        break;
+      String scanSsid = WiFi.SSID(i);
+      if (scanSsid.startsWith("IR-AC-") && WiFi.RSSI(i) > bestRssi) {
+        bestRssi = WiFi.RSSI(i);
+        bestSsid = scanSsid;
       }
+    }
+    if (bestSsid.length() > 0) {
+      foundMaster = true;
+      targetSsid = strdup(bestSsid.c_str());
+      Serial.printf("[BOOT] Found IR-AC-* prefix AP: %s (RSSI: %d)\n", bestSsid.c_str(), bestRssi);
     }
   }
   WiFi.scanDelete();
@@ -1283,9 +1465,17 @@ void setup() {
       LED_ON(LED_BLUE);
       Serial.println("=== Slave Ready ===");
     } else {
-      Serial.println("\n[SLAVE] Connect failed, switching to Master");
-      deviceMode = MODE_AP_MASTER;
+      if (allowMasterFallback) {
+        Serial.println("\n[SLAVE] Connect failed, switching to Master");
+        deviceMode = MODE_AP_MASTER;
+      } else {
+        Serial.println("\n[SLAVE] Connect failed, force_mode=slave, retrying in 3s");
+        delay(3000);
+        ESP.restart();
+      }
     }
+  }
+  if (targetSsid != getApSsid()) free((void*)targetSsid);
   }
 
   if (deviceMode == MODE_AP_MASTER) {
@@ -1376,6 +1566,12 @@ void loop() {
   if (deviceMode == MODE_AP_MASTER) {
     server.handleClient();
     dnsServer.processNextRequest();
+    handleMasterUdpReceive();
+  }
+
+  if (pairingMode && pairingUntil < millis()) {
+    pairingMode = false;
+    Serial.println("[PAIR] Pairing window expired");
   }
 
   // IR 捕获（主机和 STA Home 模式）

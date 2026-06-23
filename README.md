@@ -292,6 +292,7 @@ firmware/
 | v1.5 | 华凌空调自定义编码器（R05D/Gray码）、格力 YBOFB 自定义编码器、Captive Portal 自动弹出 |
 | v2.0 | WiFi STA + MQTT Home Assistant + DS18B20 温度 + AM312 人体传感器 + rboot 双分区 OTA |
 | v2.2 | AP 热点名称/密码可配置、从机自适应组网、短路 D7-GND 恢复出厂、WebUI 恢复出厂设置 |
+| v2.3 | 设备唯一 SSID（IR-AC-XXXX）、强制模式切换、从机列表+配对模式、WebUI 显示 MAC |
 
 ## 许可证
 

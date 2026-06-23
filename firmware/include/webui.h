@@ -90,6 +90,13 @@ input:focus{border-color:var(--blue)}
 font-size:12px;word-break:break-all;max-height:80px;overflow-y:auto;margin:8px 0;color:var(--text3)}
 .learn-pulse{animation:lp 1.5s infinite}
 @keyframes lp{0%,100%{box-shadow:0 0 0 0 rgba(255,59,48,.25)}50%{box-shadow:0 0 0 10px rgba(255,59,48,0)}}
+.pair-pulse{animation:pp 1.2s infinite}
+@keyframes pp{0%,100%{box-shadow:0 0 0 0 rgba(0,122,255,.3)}50%{box-shadow:0 0 0 12px rgba(0,122,255,0)}}
+.slave-dot{width:8px;height:8px;border-radius:50%;background:#34C759;display:inline-block;margin-right:8px}
+.slave-row{display:flex;align-items:center;padding:8px 0;font-size:13px;border-bottom:.5px solid var(--gray6)}
+.slave-row:last-child{border-bottom:none}
+.slave-mac{flex:1;color:var(--gray)}
+.slave-ip{color:var(--gray);font-size:12px;margin-right:8px}
 .hist-item{display:flex;align-items:center;padding:10px 16px;gap:10px}
 .hist-item+.hist-item{border-top:.5px solid var(--gray6)}
 .hist-info{flex:1;min-width:0}
@@ -275,8 +282,24 @@ nav.bar{max-width:var(--max);left:50%;transform:translateX(-50%);border-radius:v
 <div class="it" onclick="clearAll()"><span style="color:var(--red)">清除所有数据</span><span class="arr"></span></div>
 <div class="it" onclick="factoryReset()"><span style="color:var(--red)">恢复出厂设置</span><span class="arr"></span></div>
 </div>
+<div class="cd" id="slaves-card" style="display:none"><div class="cd-h">从机设备</div>
+<div id="slave-list" style="padding:8px 16px"><div style="color:var(--gray);font-size:13px">加载中...</div></div>
+<div style="padding:0 16px 12px">
+<button class="b b-or b-fw" id="pair-btn" onclick="togglePair()">配对新设备</button>
+</div></div>
+<div class="cd" id="devmode-card" style="display:none"><div class="cd-h">设备模式</div><div class="cd-b">
+<div class="seg" id="s-devmode">
+<button data-v="auto" class="active">自动</button>
+<button data-v="ap">AP主机</button>
+<button data-v="slave">STA从机</button>
+<button data-v="home">Home</button>
+</div>
+<div style="font-size:13px;color:var(--text3);margin-top:8px">强制模式覆盖自动检测，保存后重启</div>
+<button class="b b-bl b-fw" style="margin-top:10px" onclick="saveForceMode()">保存并重启</button>
+</div></div>
 <div class="cd"><div class="cd-h">关于</div>
-<div class="it"><span>版本</span><span style="color:var(--gray)">v2.1</span></div>
+<div class="it"><span>版本</span><span style="color:var(--gray)">v2.3</span></div>
+<div class="it"><span>MAC</span><span id="sys-mac" style="color:var(--gray)">--</span></div>
 <div class="it"><span>设备</span><span style="color:var(--gray)">IR Mini V105</span></div>
 <div class="it"><span>协议库</span><span style="color:var(--gray)">IRremoteESP8266</span></div>
 </div>
@@ -550,6 +573,57 @@ function factoryReset(){
   if(!confirm('确定恢复出厂设置？\n\n所有配置将被清除（WiFi、MQTT、热点配置）。\n设备将以默认 IR-AC / 12345678 启动。'))return;
   toast('恢复出厂中...');
   fetch('/api/factory/reset',{method:'POST'}).then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启中...':'失败')}).catch(function(){toast('失败')});
+}
+var slavePollTimer=null;
+function loadSysInfo(){
+  fetch('/api/system/info').then(function(r){return r.json()}).then(function(d){
+    if(d.mac)$('sys-mac').textContent=d.mac;
+    var seg=$('s-devmode');if(seg){
+      seg.querySelectorAll('button').forEach(function(b){
+        var fm=d.forceMode||0;
+        b.classList.toggle('active',(b.dataset.v==='auto'&&fm===0)||(b.dataset.v==='ap'&&fm===1)||(b.dataset.v==='slave'&&fm===2)||(b.dataset.v==='home'&&fm===3));
+      });
+    }
+    if(d.mode==='ap'){$('slaves-card').style.display='';$('devmode-card').style.display='';startSlavePoll()}
+    else{$('slaves-card').style.display='none';$('devmode-card').style.display='';stopSlavePoll()}
+  }).catch(function(){});
+}
+loadSysInfo();
+function initDevModeSeg(){
+  var seg=$('s-devmode');if(!seg)return;
+  var bs=seg.querySelectorAll('button');
+  bs.forEach(function(b){b.onclick=function(){bs.forEach(function(x){x.classList.remove('active')});b.classList.add('active')}});
+}
+initDevModeSeg();
+function saveForceMode(){
+  var seg=$('s-devmode');var v='auto';
+  if(seg){var act=seg.querySelector('.active');if(act)v=act.dataset.v}
+  toast('保存中...');
+  fetch('/api/mode/force',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+v})
+  .then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启中...':'失败')}).catch(function(){toast('失败')});
+}
+function startSlavePoll(){if(slavePollTimer)return;slavePollTimer=setInterval(loadSlaves,3000);loadSlaves()}
+function stopSlavePoll(){if(slavePollTimer){clearInterval(slavePollTimer);slavePollTimer=null}}
+function loadSlaves(){
+  fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
+    var el=$('slave-list');if(!el)return;
+    var h='';
+    if(d.slaves&&d.slaves.length>0){
+      d.slaves.forEach(function(s){h+='<div class="slave-row"><span class="slave-dot"></span><span class="slave-mac">'+s.mac+'</span><span class="slave-ip">'+s.ip+'</span></div>'})
+    }else{h='<div style="color:var(--gray);font-size:13px;padding:8px 0">暂无从机连接</div>'}
+    el.innerHTML=h;
+    var pb=$('pair-btn');
+    if(pb){
+      if(d.pairing){pb.textContent='配对中 ('+d.pairingLeft+'s)...';pb.classList.add('pair-pulse')}
+      else{pb.textContent='配对新设备';pb.classList.remove('pair-pulse')}
+    }
+  }).catch(function(){});
+}
+function togglePair(){
+  fetch('/api/slaves').then(function(r){return r.json()}).then(function(d){
+    if(d.pairing){fetch('/api/pair/stop',{method:'POST'}).then(function(){loadSlaves()})}
+    else{toast('配对模式已开启');fetch('/api/pair/start',{method:'POST'}).then(function(){loadSlaves()})}
+  });
 }
 </script>
 </body></html>)rawliteral";
