@@ -953,7 +953,7 @@ void handleMasterUdpReceive() {
     for (int i = 0; i < MAX_SLAVES; i++) {
       if (strcmp(slaves[i].mac, mac.c_str()) == 0) { alreadyKnown = true; slot = i; break; }
     }
-    if (!alreadyKnown && (pairingMode || true)) {
+    if (!alreadyKnown && pairingMode) {
       for (int i = 0; i < MAX_SLAVES; i++) {
         if (slaves[i].mac[0] == '\0') { slot = i; break; }
       }
