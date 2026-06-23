@@ -711,11 +711,11 @@ void handleFactoryReset() {
 
 void handleSystemInfo() {
   String json = "{";
-  json += "\"mac\":\"" + WiFi.macAddress() + "\",";
-  json += "\"apMac\":\"" + WiFi.softAPmacAddress() + "\",";
-  json += "\"chipId\":\"" + String(ESP.getChipId(), HEX) + "\",";
+  json += "\"mac\":\"" + jsonEscape(WiFi.macAddress()) + "\",";
+  json += "\"apMac\":\"" + jsonEscape(WiFi.softAPmacAddress()) + "\",";
+  json += "\"chipId\":\"" + jsonEscape(String(ESP.getChipId(), HEX)) + "\",";
   json += "\"flashSize\":" + String(ESP.getFlashChipSize()) + ",";
-  json += "\"mode\":\"" + String(modeString()) + "\",";
+  json += "\"mode\":\"" + jsonEscape(String(modeString())) + "\",";
   json += "\"forceMode\":" + String(cfg.force_mode) + ",";
   json += "\"uptime\":" + String(millis());
   json += "}";
@@ -1304,6 +1304,14 @@ void slaveLoop() {
     }
   } else if (msg.startsWith("HVAC:")) {
     slaveExecHvac(msg.substring(5));
+  } else if (msg.startsWith("ACK:")) {
+    String bssid = WiFi.BSSIDstr();
+    if (bssid.length() > 0 && strcmp(cfg.paired_master_bssid, bssid.c_str()) != 0) {
+      strncpy(cfg.paired_master_bssid, bssid.c_str(), sizeof(cfg.paired_master_bssid) - 1);
+      cfg.paired_master_bssid[sizeof(cfg.paired_master_bssid) - 1] = '\0';
+      saveConfig();
+      Serial.printf("[SLAVE] Paired with master BSSID: %s\n", bssid.c_str());
+    }
   }
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -1412,6 +1420,7 @@ void setup() {
   const char* targetSsid = getApSsid();
   const char* targetPass = getApPass();
   bool foundMaster = false;
+  bool targetSsidAllocated = false;
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == targetSsid) {
       foundMaster = true;
@@ -1432,6 +1441,7 @@ void setup() {
     if (bestSsid.length() > 0) {
       foundMaster = true;
       targetSsid = strdup(bestSsid.c_str());
+      targetSsidAllocated = true;
       Serial.printf("[BOOT] Found IR-AC-* prefix AP: %s (RSSI: %d)\n", bestSsid.c_str(), bestRssi);
     }
   }
@@ -1475,7 +1485,18 @@ void setup() {
       }
     }
   }
-  if (targetSsid != getApSsid()) free((void*)targetSsid);
+  if (targetSsidAllocated) free((void*)targetSsid);
+  }
+
+  if (cfg.force_mode == FORCE_MODE_SLAVE && deviceMode != MODE_STA_SLAVE) {
+    Serial.println("[BOOT] force_mode=slave but no master found, retrying in 3s");
+    delay(3000);
+    ESP.restart();
+  }
+  if (cfg.force_mode == FORCE_MODE_HOME && hasSTA && deviceMode != MODE_STA_HOME) {
+    Serial.println("[BOOT] force_mode=home but STA failed, retrying in 3s");
+    delay(3000);
+    ESP.restart();
   }
 
   if (deviceMode == MODE_AP_MASTER) {
