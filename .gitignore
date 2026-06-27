@@ -35,6 +35,8 @@ tools/
 
 # Internal docs (private)
 docs/
+doc/
+.wiki-work/
 AGENTS.md
 
 # Codegraph
