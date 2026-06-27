@@ -8,8 +8,10 @@ the rboot "new image" layout, and generates ready-to-flash binary images.
 Usage: python prepare_flash.py [rom0|rom1|both]
 """
 
-import sys
+import os
 import struct
+import sys
+import zlib
 from pathlib import Path
 
 FIRMWARE_DIR = Path(__file__).parent
@@ -31,6 +33,87 @@ ESP_FLASH_MODE_DOUT = 0x03
 ESP_IMAGE_CHECKSUM_INIT = 0xEF
 IROM_VADDR_BASE = 0x40200000
 IROM_BANK_SIZE = 0x100000
+OTA_MANIFEST_MAGIC = b"IRACOTA1"
+OTA_MANIFEST_SIZE = 64
+OTA_MANIFEST_VERSION = 1
+OTA_MANIFEST_FORMAT_RBOOT_EA04 = 1
+OTA_MANIFEST_TARGET_ANY = 0xFF
+OTA_BOARD_ID = "GK01_IR_MINI_V105"
+OTA_BOARD_FIELD_SIZE = 20
+OTA_VERSION_FIELD_SIZE = 20
+OTA_MANIFEST_CRC_OFFSET = 16
+
+
+def fixed_ascii(value, size):
+    data = value.encode("ascii", errors="ignore")[:size - 1]
+    return data + b"\x00" * (size - len(data))
+
+
+def firmware_version():
+    value = os.environ.get("IRAC_VERSION") or os.environ.get("GITHUB_REF_NAME") or "dev"
+    return value.strip() or "dev"
+
+
+def crc32_with_zeroed_field(data, field_offset, field_size):
+    view = bytearray(data)
+    view[field_offset:field_offset + field_size] = b"\x00" * field_size
+    return zlib.crc32(view) & 0xFFFFFFFF
+
+
+def make_ota_manifest(image_size, image_crc32, version_text, target=OTA_MANIFEST_TARGET_ANY):
+    return struct.pack(
+        "<8sBBBBII20s20sI",
+        OTA_MANIFEST_MAGIC,
+        OTA_MANIFEST_VERSION,
+        OTA_MANIFEST_FORMAT_RBOOT_EA04,
+        target,
+        ESP_FLASH_MODE_DOUT,
+        image_size,
+        image_crc32,
+        fixed_ascii(OTA_BOARD_ID, OTA_BOARD_FIELD_SIZE),
+        fixed_ascii(version_text, OTA_VERSION_FIELD_SIZE),
+        0,
+    )
+
+
+def verify_ota_manifest(image):
+    if len(image) < 16 + OTA_MANIFEST_SIZE:
+        return False, "image too small"
+    if image[0] != ESP_IMAGE_MAGIC_NEW1 or image[1] != ESP_IMAGE_MAGIC_NEW2:
+        return False, "missing EA04 rboot image header"
+    if image[2] != ESP_FLASH_MODE_DOUT:
+        return False, "image is not DOUT flash mode"
+
+    irom_len = struct.unpack_from("<I", image, 12)[0]
+    if irom_len < OTA_MANIFEST_SIZE or 16 + irom_len > len(image):
+        return False, "invalid IROM length"
+
+    manifest_offset = 16 + irom_len - OTA_MANIFEST_SIZE
+    manifest = image[manifest_offset:manifest_offset + OTA_MANIFEST_SIZE]
+    magic, version, fmt, target, flash_mode, image_size, image_crc32, board, _, _ = (
+        struct.unpack("<8sBBBBII20s20sI", manifest)
+    )
+    if magic != OTA_MANIFEST_MAGIC:
+        return False, "missing IRACOTA1 manifest"
+    if version != OTA_MANIFEST_VERSION or fmt != OTA_MANIFEST_FORMAT_RBOOT_EA04:
+        return False, "unsupported OTA manifest version or format"
+    if target != OTA_MANIFEST_TARGET_ANY:
+        return False, "release OTA image should use target=any"
+    if flash_mode != ESP_FLASH_MODE_DOUT:
+        return False, "manifest flash mode is not DOUT"
+    if image_size != len(image):
+        return False, "manifest image_size mismatch"
+    if board.rstrip(b"\x00") != OTA_BOARD_ID.encode("ascii"):
+        return False, "manifest board mismatch"
+
+    crc_field_offset = manifest_offset + OTA_MANIFEST_CRC_OFFSET
+    actual_crc32 = crc32_with_zeroed_field(image, crc_field_offset, 4)
+    if actual_crc32 != image_crc32:
+        return False, (
+            f"manifest CRC mismatch: image=0x{actual_crc32:08x}, "
+            f"manifest=0x{image_crc32:08x}"
+        )
+    return True, None
 
 
 def make_rboot_config():
@@ -124,11 +207,16 @@ def make_rboot_new_image(app_data, rom_address):
     if len(ram_sections) > 255:
         return None, "too many RAM sections"
 
+    manifest_placeholder = b"\x00" * OTA_MANIFEST_SIZE
+
     out = bytearray()
     out += struct.pack("<BBBBIII",
                        ESP_IMAGE_MAGIC_NEW1, ESP_IMAGE_MAGIC_NEW2,
-                       flags1, flags2, entry, 0, len(irom_data))
+                       flags1, flags2, entry, 0,
+                       len(irom_data) + OTA_MANIFEST_SIZE)
     out += irom_data
+    manifest_offset = len(out)
+    out += manifest_placeholder
     out += struct.pack("<BBBBI",
                        ESP_IMAGE_MAGIC, len(ram_sections),
                        flags1, flags2, entry)
@@ -144,6 +232,13 @@ def make_rboot_new_image(app_data, rom_address):
     if len(out) <= checksum_pos:
         out.extend(b"\xff" * (checksum_pos + 1 - len(out)))
     out[checksum_pos] = checksum
+
+    out[manifest_offset:manifest_offset + OTA_MANIFEST_SIZE] = make_ota_manifest(
+        len(out), 0, firmware_version())
+    crc_field_offset = manifest_offset + OTA_MANIFEST_CRC_OFFSET
+    image_crc32 = crc32_with_zeroed_field(out, crc_field_offset, 4)
+    out[manifest_offset:manifest_offset + OTA_MANIFEST_SIZE] = make_ota_manifest(
+        len(out), image_crc32, firmware_version())
     return out, None
 
 
@@ -163,10 +258,14 @@ def strip_eboot(src, dst, rom_address):
     if rboot_image is None:
         print(f"ERROR: unable to convert app image for rboot: {error}")
         return False
+    ok, error = verify_ota_manifest(rboot_image)
+    if not ok:
+        print(f"ERROR: generated OTA manifest is invalid: {error}")
+        return False
     dst.write_bytes(rboot_image)
     print(
         f"  {src.name} ({len(data)}B) -> {dst.name} "
-        f"({len(rboot_image)}B, rboot new image)"
+        f"({len(rboot_image)}B, rboot new image + IRACOTA1 manifest)"
     )
     return True
 
@@ -228,6 +327,9 @@ def main():
             make_combined(diag_path, "diag-combined.bin")
 
     if rom0_ready:
+        ota_path = OUTPUT_DIR / "ota.bin"
+        ota_path.write_bytes(rom0_path.read_bytes())
+        print(f"  {ota_path.name} ({ota_path.stat().st_size}B, WebUI OTA recommended alias)")
         print("Preparing combined first-flash image...")
         make_combined(rom0_path)
 
@@ -269,7 +371,11 @@ def main():
     print()
     print("Do NOT flash .pio/build/.../firmware.bin to 0x0 for this rboot layout.")
     print("Do NOT upload combined.bin, rboot.bin, or .pio/build/.../firmware.bin in WebUI OTA.")
-    print("For WebUI OTA, upload the alternate ROM shown by the WebUI: flash_images/rom0.bin or flash_images/rom1.bin.")
+    print("For WebUI OTA, upload flash_images/ota.bin (recommended).")
+    print(
+        "flash_images/rom0.bin and rom1.bin are compatibility aliases; "
+        "OTA writes the inactive ROM automatically."
+    )
     print()
     print("combined.bin includes rboot config: ROM0=0x2000, ROM1=0x102000.")
     print("OTA updates will write to the alternate ROM automatically.")

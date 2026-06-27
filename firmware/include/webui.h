@@ -373,10 +373,10 @@ select{background:var(--card);color:var(--text)}
 <div class="ota-stat"><span class="ota-k">准备写入</span><span class="ota-v" id="ota-target-wrap">ROM <span id="ota-target">-</span></span></div>
 </div>
 <div class="ota-guide" id="ota-guide">
-<div id="ota-guide-main"><b>这里只能上传 OTA 应用镜像。</b>设备会自动写入“准备写入”的分区，上传后重启验证。</div>
+<div id="ota-guide-main"><b>这里只能上传 Web OTA 应用镜像。</b>设备会自动写入备用分区，上传后重启验证。</div>
 <ul class="ota-list">
-<li class="yes"><span>可上传</span><div id="ota-allow">Release 里的 firmware-rom*-*.bin，或本地 flash_images/rom*.bin</div></li>
-<li class="no"><span>不要传</span><div>combined.bin、rboot.bin、.pio/build/.../firmware.bin</div></li>
+<li class="yes"><span>可上传</span><div id="ota-allow">Release 里的 firmware-ota-*.bin，或本地 flash_images/ota.bin</div></li>
+<li class="no"><span>不要传</span><div>combined.bin、rboot.bin、.pio/build/.../firmware.bin、旧版无 manifest 包</div></li>
 </ul>
 </div>
 <form method="POST" action="/update" enctype="multipart/form-data" id="ota-form">
@@ -399,7 +399,7 @@ select{background:var(--card);color:var(--text)}
 var sigs=JSON.parse(localStorage.getItem('ir_sigs')||'[]');
 var hist=[],recording=false,latestRaw='',latestProto='',latestBits=0,pollTimer=null;
 var renameIdx=-1;
-var otaTargetRom='-',otaSupported=true,otaTargetFile='flash_images/rom?.bin';
+var otaTargetRom='-',otaSupported=true,otaTargetFile='flash_images/ota.bin';
 fetch('/api/ota/status').then(function(r){return r.json()}).then(function(d){
   otaSupported=d.ota_supported!==false;
   if(!otaSupported){
@@ -415,15 +415,21 @@ fetch('/api/ota/status').then(function(r){return r.json()}).then(function(d){
   }
   var el=$('ota-rom');if(el)el.textContent=d.current_rom;
   otaTargetRom=(d.target_rom!==undefined)?d.target_rom:(d.current_rom===0?1:0);
-  otaTargetFile='flash_images/rom'+otaTargetRom+'.bin';
+  otaTargetFile='flash_images/ota.bin';
   var tg=$('ota-target');if(tg)tg.textContent=otaTargetRom;
-  var al=$('ota-allow');if(al)al.textContent='Release 里的 firmware-rom'+otaTargetRom+'-*.bin，或本地 '+otaTargetFile;
+  var al=$('ota-allow');if(al)al.textContent='Release 里的 firmware-ota-*.bin，或本地 '+otaTargetFile+'（rom0/rom1 为兼容别名）';
 }).catch(function(){});
 var otaFileOk=false;
 function otaSize(n){return n>1048576?(n/1048576).toFixed(2)+' MB':Math.ceil(n/1024)+' KB'}
 function otaMsg(t,cls){var m=$('ota-msg');if(m){m.textContent=t;m.className='ota-meta '+(cls||'ota-wait')}}
 function otaMeta(t,cls){var m=$('ota-file-meta');if(m){m.textContent=t;m.className='ota-meta '+(cls||'ota-wait')}}
 function otaLe32(a,o){return (a[o]|(a[o+1]<<8)|(a[o+2]<<16)|(a[o+3]<<24))>>>0}
+var otaCrcTbl=null;
+function otaCrc32(a,z,l){
+  if(!otaCrcTbl){otaCrcTbl=[];for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++)c=(c&1)?((c>>>1)^0xEDB88320):(c>>>1);otaCrcTbl[n]=c>>>0}}
+  var c=0xFFFFFFFF;for(var i=0;i<a.length;i++){var v=(i>=z&&i<z+l)?0:a[i];c=(c>>>8)^otaCrcTbl[(c^v)&255]}return(~c)>>>0;
+}
+function otaAscii(a,o,l){var s='';for(var i=0;i<l;i++){var c=a[o+i];if(c===0)break;if(c<32||c>126)return null;s+=String.fromCharCode(c)}return s}
 function otaRbootHeadAt(a,o){return a.length>=o+16&&a[o]===0xEA&&a[o+1]===0x04&&otaLe32(a,o+8)===0&&otaLe32(a,o+12)>0&&otaLe32(a,o+12)<0xFE000}
 function otaRbootAt(a,o){return otaRbootHeadAt(a,o)&&a[o+2]===0x03}
 function otaOldAppHeadAt(a,o){return a.length>=o+16&&a[o]===0xE9&&a[o+1]>=3&&a[o+1]<=16&&otaLe32(a,o+8)===0x40202010}
@@ -446,24 +452,51 @@ function otaRbootInfo(a,o){
   var cp=pos|15;if(cp>=a.length)return{ok:false,err:'no_checksum'};
   if(a[cp]!==cs)return{ok:false,err:'checksum'};
   if(a.length!==cp+1)return{ok:false,err:'trailing'};
-  return{ok:true,irom:ilen,sections:cnt};
+  return{ok:true,irom:ilen,sections:cnt,manifest:16+ilen-64};
 }
-function otaSetReady(ok){otaFileOk=ok;var b=$('ota-btn');if(b){b.disabled=!ok;b.textContent=ok?'确认上传到 ROM '+otaTargetRom:'选择 OTA 固件'}}
+function otaManifestInfo(a,info){
+  if(info.irom<64)return{ok:false,err:'missing_manifest'};
+  var o=info.manifest;if(o<16||o+64>a.length)return{ok:false,err:'manifest_offset'};
+  if(otaAscii(a,o,8)!=='IRACOTA1')return{ok:false,err:'missing_manifest'};
+  if(a[o+8]!==1||a[o+9]!==1)return{ok:false,err:'manifest_version'};
+  var target=a[o+10],mode=a[o+11],size=otaLe32(a,o+12),crc=otaLe32(a,o+16);
+  var board=otaAscii(a,o+20,20),ver=otaAscii(a,o+40,20);
+  if(mode!==0x03)return{ok:false,err:'manifest_mode'};
+  if(size!==a.length)return{ok:false,err:'manifest_size'};
+  if(board!=='GK01_IR_MINI_V105')return{ok:false,err:'board'};
+  var tr=parseInt(otaTargetRom,10);if(target!==255&&!isNaN(tr)&&target!==tr)return{ok:false,err:'target'};
+  var actual=otaCrc32(a,o+16,4);if(actual!==crc)return{ok:false,err:'crc'};
+  return{ok:true,target:target,version:ver||'dev',crc:crc};
+}
+function otaSetReady(ok){otaFileOk=ok;var b=$('ota-btn');if(b){b.disabled=!ok;b.textContent=ok?'校验通过，上传到备用 ROM '+otaTargetRom:'选择 OTA 固件'}}
 function otaValidateFile(file,done){
   otaSetReady(false);
   if(!otaSupported){otaMeta('Factory 版不支持 Web OTA。','ota-bad');otaMsg('请用 USB-TTL 直刷 factory 固件。','ota-bad');done&&done(false);return}
-  if(!file){otaMeta('未选择文件。选中文件后会先在浏览器里验头。','ota-wait');otaMsg('请选择 firmware-rom'+otaTargetRom+'-*.bin 或 '+otaTargetFile,'ota-bad');done&&done(false);return}
+  if(!file){otaMeta('未选择文件。选中文件后会先在浏览器里验头。','ota-wait');otaMsg('请选择 firmware-ota-*.bin 或 '+otaTargetFile,'ota-bad');done&&done(false);return}
   otaMeta('已选择：'+file.name+'（'+otaSize(file.size)+'）','ota-wait');
-  if(file.size>0xFE000){otaMsg('文件超过 OTA 分区大小。请选择 rboot OTA 镜像 rom'+otaTargetRom+'.bin，不要上传 combined.bin。','ota-bad');done&&done(false);return}
+  if(file.size>0xFE000){otaMsg('文件超过 OTA 分区大小。请选择 firmware-ota-*.bin，不要上传 combined.bin。','ota-bad');done&&done(false);return}
   var rd=new FileReader();
   rd.onerror=function(){otaMsg('无法读取文件，请重新选择','ota-bad');done&&done(false)};
   rd.onload=function(){
     var a=new Uint8Array(rd.result);
     var info=otaRbootInfo(a,0);
     if(info.ok){
-      otaMeta('校验通过：rboot OTA 镜像，checksum 正确。','ota-ok');
-      otaMsg('可以上传。将写入 ROM '+otaTargetRom+'，重启后稳定运行约 25 秒才确认升级。','ota-ok');
-      otaSetReady(true);done&&done(true);return;
+      var mf=otaManifestInfo(a,info);
+      if(mf.ok){
+        otaMeta('校验通过：IRACOTA1，板型匹配，CRC32 正确，版本 '+mf.version+'。','ota-ok');
+        otaMsg('可以上传。设备将写入备用 ROM '+otaTargetRom+'，重启后稳定运行约 25 秒才确认升级。','ota-ok');
+        otaSetReady(true);done&&done(true);return;
+      }
+      var em='OTA manifest 校验失败。';
+      if(mf.err==='missing_manifest')em='这是旧版 rboot OTA 包，缺少 IRACOTA1 manifest/CRC。请上传 firmware-ota-*.bin。';
+      else if(mf.err==='board')em='这个包不是 GK01 / IR Mini V105 固件，已拒绝。';
+      else if(mf.err==='target')em='这个包声明的目标 ROM 与本次备用分区不一致，已拒绝。';
+      else if(mf.err==='crc')em='OTA 包 CRC32 不匹配，文件可能损坏或不是本次发布产物。';
+      else if(mf.err==='manifest_size')em='OTA manifest 中的镜像大小与文件大小不一致。';
+      else if(mf.err==='manifest_mode')em='OTA manifest 不是 DOUT flash mode。';
+      otaMsg(em,'ota-bad');
+      otaMeta('校验失败：不会上传，也不会写入 flash。','ota-bad');
+      done&&done(false);return;
     }
     if(otaRbootHeadAt(a,0)&&a[2]!==0x03){
       otaMsg('这个 OTA 镜像不是 DOUT flash mode。本板必须使用 DOUT，请重新构建或运行 prepare_flash.py。','ota-bad');
@@ -473,7 +506,7 @@ function otaValidateFile(file,done){
     }else if(otaOldAppAt(a,0x1000)){
       otaMsg('这是 PlatformIO firmware.bin，前面带 eboot 头。请运行 prepare_flash.py 后上传 '+otaTargetFile+'。','ota-bad');
     }else if(otaRbootAt(a,0x2000)||otaOldAppAt(a,0x2000)){
-      otaMsg('这是 combined.bin，首刷/救砖才写 0x0。OTA 请上传 firmware-rom'+otaTargetRom+'-*.bin 或 '+otaTargetFile+'。','ota-bad');
+      otaMsg('这是 combined.bin，首刷/救砖才写 0x0。OTA 请上传 firmware-ota-*.bin 或 '+otaTargetFile+'。','ota-bad');
     }else if(a.length>=16&&(a[0]===0xE9||a[0]===0xEA)){
       otaMsg('这是 ESP 镜像，但不是本项目 OTA 应用镜像。不要上传 rboot.bin 或其他 bootloader。','ota-bad');
     }else{

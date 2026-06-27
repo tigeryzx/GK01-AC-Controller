@@ -20,6 +20,8 @@ ESP_IMAGE_MAGIC = 0xE9
 RBOOT_IMAGE_MAGIC_NEW1 = 0xEA
 RBOOT_IMAGE_MAGIC_NEW2 = 0x04
 ESP_IMAGE_CHECKSUM_INIT = 0xEF
+OTA_MANIFEST_MAGIC = b"IRACOTA1"
+OTA_MANIFEST_SIZE = 64
 
 
 def make_rboot_config():
@@ -58,6 +60,18 @@ def normalize_esp8266_checksum(image):
     return True
 
 
+def has_ota_manifest(image):
+    if len(image) < 16 + OTA_MANIFEST_SIZE:
+        return False
+    if image[0] != RBOOT_IMAGE_MAGIC_NEW1 or image[1] != RBOOT_IMAGE_MAGIC_NEW2:
+        return False
+    irom_len = struct.unpack_from("<I", image, 12)[0]
+    if irom_len < OTA_MANIFEST_SIZE or 16 + irom_len > len(image):
+        return False
+    manifest_offset = 16 + irom_len - OTA_MANIFEST_SIZE
+    return image[manifest_offset:manifest_offset + len(OTA_MANIFEST_MAGIC)] == OTA_MANIFEST_MAGIC
+
+
 def main():
     if not RBOOT.exists():
         print(f"ERROR: {RBOOT} not found. Build rboot first.")
@@ -73,8 +87,18 @@ def main():
         print(f"ERROR: unable to normalize rboot checksum: {RBOOT}")
         sys.exit(1)
 
-    if len(rom0_data) < 2 or rom0_data[0] != RBOOT_IMAGE_MAGIC_NEW1 or rom0_data[1] != RBOOT_IMAGE_MAGIC_NEW2:
-        print(f"ERROR: {ROM0} is not an rboot new image (expected EA 04). Run firmware/prepare_flash.py first.")
+    if (
+        len(rom0_data) < 2
+        or rom0_data[0] != RBOOT_IMAGE_MAGIC_NEW1
+        or rom0_data[1] != RBOOT_IMAGE_MAGIC_NEW2
+    ):
+        print(
+            f"ERROR: {ROM0} is not an rboot new image (expected EA 04). "
+            "Run firmware/prepare_flash.py first."
+        )
+        sys.exit(1)
+    if not has_ota_manifest(rom0_data):
+        print(f"ERROR: {ROM0} is missing IRACOTA1 manifest. Run firmware/prepare_flash.py first.")
         sys.exit(1)
 
     if len(rboot_data) > RBOOT_MAX_SIZE:

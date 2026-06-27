@@ -9,6 +9,8 @@
 *.hex
 *.map
 *.o
+__pycache__/
+*.pyc
 
 # 例外：rboot 预编译引导器（构建/刷写需要）
 !firmware/rboot-bootloader/rboot.bin

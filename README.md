@@ -101,7 +101,7 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 
 > `-fm dout` 是必须的，用 `dio`/`qio` 会失败。板子没有 FLASH 按键，必须短接 IO0-GND 才能进入刷写模式。Micro USB 仅供电，没有数据线。
 >
-> `firmware-rom0-vX.X.bin` / `firmware-rom1-vX.X.bin` 只用于 WebUI OTA 上传，不要用 esptool 写到 `0x0`。实际上传哪一个，以 WebUI「准备写入」显示的 ROM 为准。
+> `firmware-ota-vX.X.bin` 只用于 WebUI OTA 上传，不要用 esptool 写到 `0x0`。`firmware-rom0/rom1-vX.X.bin` 是兼容别名，内容与 `firmware-ota` 相同，不需要手动按 ROM 选择。
 
 刷写完成后必须断开 `IO0-GND`，再重新上电。若仍短接 IO0，ESP8266 会停在下载模式，应用不会启动，也不会出现 WiFi。
 
@@ -110,13 +110,14 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 | 文件 | 用途 |
 |------|------|
 | `combined-vX.X.bin` | 首刷、救砖、从旧版迁移首选；esptool 写到 `0x0` |
-| `firmware-rom0-vX.X.bin` | rboot OTA 应用镜像（`EA 04` new image）；WebUI 显示目标 ROM0 时上传 |
-| `firmware-rom1-vX.X.bin` | rboot OTA 应用镜像（`EA 04` new image）；WebUI 显示目标 ROM1 时上传 |
+| `firmware-ota-vX.X.bin` | WebUI OTA 推荐文件；rboot `EA 04` 应用镜像，内置 `IRACOTA1` manifest + CRC32 |
+| `firmware-rom0-vX.X.bin` | 兼容别名；内容与 `firmware-ota` 相同，不需要手动按 ROM 选择 |
+| `firmware-rom1-vX.X.bin` | 兼容别名；内容与 `firmware-ota` 相同，不需要手动按 ROM 选择 |
 | `rboot-vX.X.bin` | 仅 rboot 引导器；高级分步刷写才用 |
 
-不要把 `firmware-rom0/rom1-vX.X.bin` 用 esptool 写到 `0x0`。这两个文件不是完整首刷镜像，只能用于 WebUI OTA 或分步写入对应 ROM slot。
+不要把 `firmware-ota` 或 `firmware-rom0/rom1-vX.X.bin` 用 esptool 写到 `0x0`。这些文件不是完整首刷镜像，只能用于 WebUI OTA 或高级分步写入对应 ROM slot。
 
-> 注意：本项目的 ROM0/ROM1 OTA 包是 slot-independent 设计，当前两者内容相同。WebUI 显示“准备写入 ROM0/ROM1”是为了降低人工选错文件的概率；真正的写入地址由设备当前运行 ROM 自动决定，当前 ROM0 时写 ROM1，当前 ROM1 时写 ROM0。
+> 注意：本项目 OTA 包是 slot-independent 设计。WebUI 显示“准备写入 ROM0/ROM1”是为了告诉你设备会写哪个备用分区；真正的写入地址由设备当前运行 ROM 自动决定，当前 ROM0 时写 ROM1，当前 ROM1 时写 ROM0。
 
 ### WebUI OTA 升级
 
@@ -124,15 +125,16 @@ python -m esptool --port COMx --baud 115200 --before no-reset write-flash -fm do
 
 | 可以上传 | 不要上传 |
 |---------|----------|
-| WebUI 显示的目标 ROM 对应的 `firmware-rom0/rom1-vX.X.bin` | `combined-vX.X.bin` |
-| WebUI 显示的目标 ROM 对应的 `firmware/flash_images/rom0.bin` 或 `rom1.bin` | `rboot-vX.X.bin` |
-| `prepare_flash.py` 生成的 rboot OTA 应用镜像（`EA 04`） | `.pio/build/.../firmware.bin` |
+| Release 里的 `firmware-ota-vX.X.bin` | `combined-vX.X.bin` |
+| 本地 `firmware/flash_images/ota.bin` | `rboot-vX.X.bin` |
+| 兼容别名 `firmware-rom0/rom1-vX.X.bin` 或 `flash_images/rom0.bin` / `rom1.bin` | `.pio/build/.../firmware.bin` |
+| `prepare_flash.py` 生成的 rboot OTA 应用镜像（`EA 04` + `IRACOTA1` manifest） | 旧版无 manifest 的 OTA 包 |
 
-WebUI 会先读取整个文件并校验镜像：OTA 包必须以 `EA 04` 开头，flash mode 必须是 `DOUT(0x03)`，rboot new image 布局必须正确，内部 ESP8266 checksum 必须匹配。检查不通过时按钮会保持禁用，不会写入 flash。
+WebUI 会先读取整个文件并校验镜像：OTA 包必须以 `EA 04` 开头，flash mode 必须是 `DOUT(0x03)`，rboot new image 布局必须正确，内部 ESP8266 checksum 必须匹配，并且 IROM 末尾必须带 `IRACOTA1` manifest。manifest 包含板型 `GK01_IR_MINI_V105`、目标策略、镜像大小和 CRC32。检查不通过时按钮会保持禁用，不会写入 flash。
 
-固件端 `/update` 也会再次校验：上传开始时检查 `EA 04` rboot OTA 头、DOUT 和大小；写入 inactive ROM 后还会从 flash 回读，重新解析 RAM sections 并计算内部 checksum。页面校验只是第一层保护，真正切换 ROM 前固件还会再挡一次。
+固件端 `/update` 也会再次校验：上传开始时检查 `EA 04` rboot OTA 头、DOUT 和大小；写入 inactive ROM 后还会从 flash 回读，重新解析 RAM sections、计算内部 checksum、读取 manifest 并计算 CRC32。页面校验只是第一层保护，真正切换 ROM 前固件还会再挡一次。
 
-> OTA 的自动回滚需要新固件至少能启动到应用代码并执行健康检查。如果误传 `combined.bin`、`rboot.bin`、带 eboot 头的 PlatformIO `firmware.bin`，或旧版只“剥 eboot”的 `E9` 镜像，设备可能进不了应用代码，软件回滚就没有机会运行。这种情况需要 USB-TTL 进入刷写模式，擦除后重新刷 `combined-vX.X.bin` 到 `0x0`。
+> OTA 的自动回滚需要新固件至少能启动到应用代码并执行健康检查。如果误传 `combined.bin`、`rboot.bin`、带 eboot 头的 PlatformIO `firmware.bin`、旧版无 manifest 包，或旧版只“剥 eboot”的 `E9` 镜像，设备可能进不了应用代码，软件回滚就没有机会运行。这种情况需要 USB-TTL 进入刷写模式，擦除后重新刷 `combined-vX.X.bin` 到 `0x0`。
 
 OTA 流程固定写入另一个 ROM：当前运行 ROM0 时写 ROM1，当前运行 ROM1 时写 ROM0。这个目标由 rboot 配置和 `/api/ota/status` 动态决定，不需要用户手动指定，也不应该写死文件名。
 
@@ -311,7 +313,7 @@ GPIO13/D7 与黄色 LED 复用，可作为本机按键/触点使用：
 │   ├── platformio.ini           # PlatformIO 配置（rboot 双分区 OTA）
 │   ├── src/main.cpp             # 主程序（AP/STA/Home 三模式 + 设备管理 + IR + UDP + MQTT）
 │   ├── include/webui.h          # iOS 风格 WebUI（PROGMEM 内嵌，5 Tab）
-│   ├── prepare_flash.py         # 生成 rboot new image OTA 包和首刷 combined 镜像
+│   ├── prepare_flash.py         # 生成 EA04 + IRACOTA1 OTA 包和首刷 combined 镜像
 │   ├── rboot-bootloader/        # rboot 双分区引导器（MIT）
 │   └── ld/                      # rboot 链接脚本（ROM0/ROM1）
 ├── scripts/
@@ -338,13 +340,14 @@ GPIO13/D7 与黄色 LED 复用，可作为本机按键/触点使用：
 
 ## CI/CD
 
-推送到 `master`/`dav` 时 GitHub Actions 自动编译验证。打 `v*` tag 时自动编译 4 个固件文件并发 GitHub Release：
+推送到 `master`/`dav` 时 GitHub Actions 自动编译验证。打 `v*` tag 时自动编译固件文件、校验 OTA manifest/CRC，并发 GitHub Release：
 
 | 文件 | 用途 |
 |------|------|
 | `combined-vX.X.bin` | 首刷/救砖首选：rboot + ROM0，esptool 写到 `0x0` |
-| `firmware-rom0-vX.X.bin` | rboot OTA 应用镜像（`EA 04`）；OTA 目标为 ROM0 时上传，或分步写到 `0x2000` |
-| `firmware-rom1-vX.X.bin` | rboot OTA 应用镜像（`EA 04`）；OTA 目标为 ROM1 时上传，或分步写到 `0x102000` |
+| `firmware-ota-vX.X.bin` | WebUI OTA 推荐文件；rboot `EA 04` 应用镜像，内置 `IRACOTA1` manifest + CRC32 |
+| `firmware-rom0-vX.X.bin` | 兼容别名；内容与 `firmware-ota` 相同 |
+| `firmware-rom1-vX.X.bin` | 兼容别名；内容与 `firmware-ota` 相同 |
 | `rboot-vX.X.bin` | 仅 rboot 引导器；分步刷写时写到 `0x0000` |
 
 ## 版本历史
@@ -357,7 +360,7 @@ GPIO13/D7 与黄色 LED 复用，可作为本机按键/触点使用：
 | v2.0 | WiFi STA + MQTT Home Assistant + DS18B20 温度 + AM312 人体传感器 + rboot 双分区 OTA |
 | v2.2 | AP 热点名称/密码可配置、从机自适应组网、短路 D7-GND 恢复出厂、WebUI 恢复出厂设置 |
 | v2.3 | AP 热点配置、强制模式切换、从机列表+配对模式、WebUI 显示 MAC |
-| v2.4 | 设备管理（楼层分组/命名/图标）、多选控制、定向 IR、远程配置从机、空调状态持久化、深色模式、rboot `EA 04` OTA 镜像、防误刷与 checksum 校验、LED 状态反馈、短按办公室预设 |
+| v2.4 | 设备管理（楼层分组/命名/图标）、多选控制、定向 IR、远程配置从机、空调状态持久化、深色模式、rboot `EA 04` OTA 镜像、`IRACOTA1` manifest + CRC32 防误刷、LED 状态反馈、短按办公室预设 |
 
 ## 许可证
 

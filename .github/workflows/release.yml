@@ -52,11 +52,21 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p release
           cp firmware/flash_images/combined.bin       "release/combined-${VERSION}.bin"
+          cp firmware/flash_images/ota.bin            "release/firmware-ota-${VERSION}.bin"
           cp firmware/flash_images/rom0.bin           "release/firmware-rom0-${VERSION}.bin"
           cp firmware/flash_images/rom1.bin           "release/firmware-rom1-${VERSION}.bin"
           cp firmware/rboot-bootloader/rboot.bin      "release/rboot-${VERSION}.bin"
           sha256sum release/*.bin > release/SHA256SUMS.txt
           ls -la release/
+
+      - name: Verify release firmware images
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          python scripts/verify_ota_images.py \
+            "release/combined-${VERSION}.bin" \
+            "release/firmware-ota-${VERSION}.bin" \
+            "release/firmware-rom0-${VERSION}.bin" \
+            "release/firmware-rom1-${VERSION}.bin"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
@@ -71,13 +81,14 @@ jobs:
             | 文件 | 用途 |
             |------|------|
             | `combined-${{ github.ref_name }}.bin` | **首刷/救砖首选**：rboot + rboot config + ROM0，一条 esptool 命令刷到 `0x0` |
-            | `firmware-rom0-${{ github.ref_name }}.bin` | rboot OTA 应用镜像（`EA 04` new image）；WebUI 显示“准备写入 ROM0”时上传 |
-            | `firmware-rom1-${{ github.ref_name }}.bin` | rboot OTA 应用镜像（`EA 04` new image）；WebUI 显示“准备写入 ROM1”时上传 |
+            | `firmware-ota-${{ github.ref_name }}.bin` | **WebUI OTA 推荐文件**：rboot `EA 04` 应用镜像，内置 `IRACOTA1` manifest + CRC32 |
+            | `firmware-rom0-${{ github.ref_name }}.bin` | 兼容别名：内容与 `firmware-ota` 相同，不需要手动按 ROM 选择 |
+            | `firmware-rom1-${{ github.ref_name }}.bin` | 兼容别名：内容与 `firmware-ota` 相同，不需要手动按 ROM 选择 |
             | `rboot-${{ github.ref_name }}.bin` | 仅 rboot 引导器；高级分步刷写时写到 `0x0000` |
             | `SHA256SUMS.txt` | 发布文件校验值 |
 
-            **不要把 `firmware-rom0/rom1` 用 esptool 写到 `0x0`。** 这两个文件是 OTA 应用镜像，不是完整首刷镜像。
-            当前 ROM0/ROM1 OTA 包采用 slot-independent 设计，设备会根据当前运行分区自动写入 inactive slot；WebUI 的“准备写入 ROM”是操作提示，不是让用户手动指定 flash 地址。
+            **不要把 `firmware-ota` 或 `firmware-rom0/rom1` 用 esptool 写到 `0x0`。** 这些文件是 OTA 应用镜像，不是完整首刷镜像。
+            当前 OTA 包采用 slot-independent 设计，设备会根据当前运行分区自动写入 inactive slot；WebUI 的“准备写入 ROM”是操作提示，不是让用户手动指定 flash 地址。
 
             ---
 
@@ -125,13 +136,13 @@ jobs:
             ## 🔄 OTA 升级（已装 v2.0+，无需 USB-TTL）
 
             1. 浏览器打开 WebUI → **设置** → **固件更新**
-            2. 按 WebUI「准备写入」显示的 ROM，选择对应的 `firmware-rom0-${{ github.ref_name }}.bin` 或 `firmware-rom1-${{ github.ref_name }}.bin` 上传
+            2. 选择 `firmware-ota-${{ github.ref_name }}.bin` 上传
             3. 页面验证通过后点上传，等待 ~30 秒，设备自动重启
             4. 新固件写入另一个分区，启动失败自动回退到旧版本（不会变砖）
 
-            OTA 页面和固件端都会校验镜像：必须是 `prepare_flash.py` 生成的 rboot OTA 应用镜像（`EA 04` new image），flash mode 为 `DOUT(0x03)`，rboot new image 布局正确，内部 checksum 匹配，大小不能超过单个 ROM slot。固件端写入后还会从 flash 回读校验，通过后才切换 ROM。
+            OTA 页面和固件端都会校验镜像：必须是 `prepare_flash.py` 生成的 rboot OTA 应用镜像（`EA 04` new image），flash mode 为 `DOUT(0x03)`，rboot new image 布局正确，内部 checksum 匹配，并带有 `IRACOTA1` manifest。manifest 会校验板型 `GK01_IR_MINI_V105`、目标策略、镜像大小和 CRC32。固件端写入后还会从 flash 回读校验，通过后才切换 ROM。
 
-            > 不要上传 `combined.bin`、`rboot.bin`、`.pio/build/.../firmware.bin` 或旧版只剥 eboot 的 `E9` 应用镜像。如果误传导致设备进不了应用代码，软件回滚无法执行，需要用 USB-TTL 重新刷 `combined-${{ github.ref_name }}.bin` 到 `0x0`。
+            > 不要上传 `combined.bin`、`rboot.bin`、`.pio/build/.../firmware.bin`、旧版无 manifest 的 OTA 包，或旧版只剥 eboot 的 `E9` 应用镜像。如果误传导致设备进不了应用代码，软件回滚无法执行，需要用 USB-TTL 重新刷 `combined-${{ github.ref_name }}.bin` 到 `0x0`。
 
             ---
 
@@ -140,8 +151,10 @@ jobs:
             - 修复 rboot 双分区首刷镜像布局：`0x0000 rboot`、`0x1000 rboot config`、`0x2000 ROM0`
             - 固定 ROM 地址：ROM0=`0x2000`，ROM1=`0x102000`
             - 发布包中的 `firmware-rom0/rom1` 均改为 rboot `EA 04` new image，修复旧 `E9` 镜像导致 `Fatal exception (3), excvaddr=0x40202010` 的启动崩溃
+            - 新增推荐 OTA 包 `firmware-ota`，并在 OTA 镜像内嵌 `IRACOTA1` manifest + CRC32，防止跨设备、损坏包和无 manifest 旧包误刷
             - WebUI OTA 页面动态显示当前 ROM 和准备写入 ROM，不再写死 ROM1
-            - 增加 OTA 上传前 checksum 校验和固件端写后回读校验，减少刷错包导致无法启动的风险
+            - 增加 OTA 上传前 checksum/manifest/CRC32 校验和固件端写后回读校验，减少刷错包导致无法启动的风险
+            - Release 自动校验 `firmware-ota`、兼容 rom 包和 `combined` 中的 OTA 镜像，校验失败不会发布
             - 默认 AP 名称统一为 `IR-AC`
             - 首页默认进入空调页，底部导航调整为：空调 / 遥控 / 设备 / 学习 / 设置
             - 增加 LED 状态反馈：启动、AP 就绪、OTA pending、配对、红外活动
