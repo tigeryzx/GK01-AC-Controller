@@ -158,6 +158,7 @@ unsigned long pairingUntil = 0;
 
 String slaveIdFromMac(const char* mac) {
   String id = "";
+  id.reserve(4);
   for (int i = 12; i < 17; i += 3) {
     if (mac[i]) id += (char)toupper(mac[i]);
     if (mac[i+1]) id += (char)toupper(mac[i+1]);
@@ -269,6 +270,8 @@ bool parseMacBytes(const char* mac, uint8_t out[6]) {
   return true;
 }
 
+bool fsMounted = false;
+
 bool replaceLittleFSFile(const char* target, const char* tmp, const char* bak, const char* tag) {
   LittleFS.remove(bak);
   bool hadOld = LittleFS.exists(target);
@@ -286,6 +289,24 @@ bool replaceLittleFSFile(const char* target, const char* tmp, const char* bak, c
 
   if (hadOld) LittleFS.remove(bak);
   return true;
+}
+
+bool ensureFSMounted(bool formatIfNeeded) {
+  if (fsMounted) return true;
+
+  fsMounted = LittleFS.begin();
+  if (fsMounted) return true;
+  if (!formatIfNeeded) return false;
+
+  Serial.println("[FS] mount failed, formatting on demand...");
+  blinkStatusLed(LED_RED, 2, 120, 120);
+  LittleFS.format();
+  fsMounted = LittleFS.begin();
+  if (!fsMounted) {
+    Serial.println("[FS] mount still failed after format");
+    blinkStatusLed(LED_RED, 8, 80, 80);
+  }
+  return fsMounted;
 }
 
 const char* modeString() {
@@ -313,6 +334,9 @@ unsigned long lastMqttReconnect = 0;
 unsigned long lastHelloSent = 0;
 #define HELLO_INTERVAL_MS 30000
 bool masterApStarted = false;
+bool configSavePending = false;
+unsigned long configSaveDue = 0;
+#define CONFIG_SAVE_DEFER_MS 2000
 
 // ===== GPIO13 按键（与黄色 LED 复用）=====
 unsigned long btnPressStart = 0;
@@ -374,6 +398,11 @@ static unsigned long otaConfirmAt = 0;  // loop 中确认 OTA 的时间点（0=�
 #define OTA_SLOT_MAX_SIZE 0xFE000       // 每个 rboot ROM slot 约 1016KB
 #define OTA_APP_FIRST_SECTION 0x40202010UL
 #define OTA_FLASH_MODE_DOUT 0x03
+#define OTA_RBOOT_MAGIC_NEW1 0xEA
+#define OTA_RBOOT_MAGIC_NEW2 0x04
+#define OTA_IMAGE_CHECKSUM_INIT 0xEF
+#define OTA_IROM_BASE 0x40200000UL
+#define OTA_IROM_LIMIT 0x40300000UL
 
 // ===== 华凌自定义编码器 =====
 #define WAHIN_HDR_MARK    4380
@@ -407,7 +436,7 @@ static const uint8_t WAHIN_TEMP_GRAY[] = {
   0xC, 0xD, 0x9, 0x8, 0xA, 0xB
 };
 
-void sendWahin(bool power, String mode, int temp, String fan, String swing) {
+void sendWahin(bool power, const String& mode, int temp, const String& fan, const String& swing) {
   temp = constrain(temp, 17, 30);
 
   uint8_t data[3] = { 0xB2, 0x00, 0x00 };
@@ -499,7 +528,7 @@ void greeSendFrame(const uint8_t frame[8], uint32_t endSpace) {
   irSend.space(endSpace);
 }
 
-void sendGreeYBOFB(bool power, String mode, int temp, String fan) {
+void sendGreeYBOFB(bool power, const String& mode, int temp, const String& fan) {
   uint8_t frameA[8] = {0x00, 0x00, 0x20, GREE_MSG_A, 0x00, 0x00, 0x00, 0x00};
 
   uint8_t modeVal = GREE_MODE_COOL;
@@ -555,7 +584,7 @@ String jsonEscape(const String& s) {
   return out;
 }
 
-int parseRaw(String& s, uint16_t* buf, int maxLen) {
+int parseRaw(const String& s, uint16_t* buf, int maxLen) {
   int count = 0, start = 0;
   while (count < maxLen) {
     int comma = s.indexOf(',', start);
@@ -569,7 +598,7 @@ int parseRaw(String& s, uint16_t* buf, int maxLen) {
   return count;
 }
 
-stdAc::opmode_t strToMode(String s) {
+stdAc::opmode_t strToMode(const String& s) {
   if (s == "Heat") return stdAc::opmode_t::kHeat;
   if (s == "Dry")  return stdAc::opmode_t::kDry;
   if (s == "Fan")  return stdAc::opmode_t::kFan;
@@ -577,7 +606,7 @@ stdAc::opmode_t strToMode(String s) {
   return stdAc::opmode_t::kCool;
 }
 
-stdAc::fanspeed_t strToFan(String s) {
+stdAc::fanspeed_t strToFan(const String& s) {
   if (s == "Low")     return stdAc::fanspeed_t::kLow;
   if (s == "Medium")  return stdAc::fanspeed_t::kMedium;
   if (s == "High")    return stdAc::fanspeed_t::kHigh;
@@ -585,7 +614,7 @@ stdAc::fanspeed_t strToFan(String s) {
   return stdAc::fanspeed_t::kAuto;
 }
 
-stdAc::swingv_t strToSwing(String s) {
+stdAc::swingv_t strToSwing(const String& s) {
   if (s == "Auto")    return stdAc::swingv_t::kAuto;
   if (s == "Highest") return stdAc::swingv_t::kHighest;
   if (s == "Low")     return stdAc::swingv_t::kLow;
@@ -603,6 +632,11 @@ void mqttPublishState();
 
 // ===== 配置持久化 =====
 bool loadConfig() {
+  if (!ensureFSMounted(false)) {
+    Serial.println("[CFG] LittleFS unavailable, using defaults");
+    return false;
+  }
+
   File f = LittleFS.open("/config.txt", "r");
   if (!f) {
     f = LittleFS.open("/config.bak", "r");
@@ -647,6 +681,11 @@ bool loadConfig() {
 }
 
 void saveConfig() {
+  if (!ensureFSMounted(true)) {
+    Serial.println("[CFG] skipped save: LittleFS unavailable");
+    return;
+  }
+
   File f = LittleFS.open("/config.tmp", "w");
   if (!f) { Serial.println("[CFG] write failed"); return; }
   f.printf("ap_ssid=%s\n", cfg.ap_ssid);
@@ -670,7 +709,22 @@ void saveConfig() {
   f.printf("device_floor=%s\n", cfg.device_floor);
   f.close();
   if (!replaceLittleFSFile("/config.txt", "/config.tmp", "/config.bak", "CFG")) return;
+  configSavePending = false;
+  configSaveDue = 0;
   Serial.println("[CFG] saved");
+}
+
+void scheduleConfigSave() {
+  configSavePending = true;
+  configSaveDue = millis() + CONFIG_SAVE_DEFER_MS;
+}
+
+void saveConfigIfDue() {
+  if (!configSavePending) return;
+  if ((long)(millis() - configSaveDue) >= 0) {
+    configSaveDue = millis() + CONFIG_SAVE_DEFER_MS;
+    saveConfig();
+  }
 }
 
 void enterRecoveryAp(const char* reason) {
@@ -728,6 +782,7 @@ void clearSlaveSlot(int slot) {
 
 void loadPairedSlaves() {
   for (int i = 0; i < MAX_SLAVES; i++) clearSlaveSlot(i);
+  if (!ensureFSMounted(false)) return;
 
   File f = LittleFS.open(SLAVES_FILE, "r");
   if (!f) return;
@@ -765,6 +820,8 @@ void loadPairedSlaves() {
 }
 
 void savePairedSlaves() {
+  if (!ensureFSMounted(true)) return;
+
   File f = LittleFS.open("/slaves.tmp", "w");
   if (!f) { Serial.println("[SLAVE] paired slave save failed"); return; }
 
@@ -783,7 +840,7 @@ void savePairedSlaves() {
 
 // ===== HTTP 页面处理 =====
 void handleRoot() {
-  const size_t total = strlen_P(INDEX_HTML);
+  const size_t total = sizeof(INDEX_HTML) - 1;
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   server.sendHeader("Pragma", "no-cache");
   server.setContentLength(total);
@@ -816,7 +873,7 @@ void handleCaptive() {
 }
 
 // ===== 空调控制（核心）=====
-bool sendHvacCommand(String vendor, bool power, String mode, int temp, String fan, String swing) {
+bool sendHvacCommand(const String& vendor, bool power, const String& mode, int temp, const String& fan, const String& swing) {
   int minTemp = (vendor == "WAHIN") ? 17 : 16;
   temp = constrain(temp, minTemp, 30);
 
@@ -899,7 +956,7 @@ void handleHvac() {
     cfg.last_temp = (uint8_t)temp;
     copyToBuffer(cfg.last_fan, sizeof(cfg.last_fan), fan);
     cfg.last_power = power;
-    saveConfig();
+    scheduleConfigSave();
   }
 
   if (ok && deviceMode == MODE_AP_MASTER) {
@@ -983,6 +1040,7 @@ void handleCapture() {
 void handleWifiScan() {
   int n = WiFi.scanNetworks();
   String json = "[";
+  json.reserve(768);
   for (int i = 0; i < n && i < 20; i++) {
     if (i > 0) json += ",";
     json += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
@@ -1010,6 +1068,7 @@ void handleWifiConnect() {
 
 void handleWifiStatus() {
   String json = "{";
+  json.reserve(192);
   json += "\"mode\":\"" + String(deviceMode == MODE_STA_HOME ? "sta" :
           (deviceMode == MODE_STA_SLAVE ? "slave" : "ap")) + "\",";
   if (deviceMode == MODE_STA_HOME) {
@@ -1043,6 +1102,7 @@ void handleWifiForget() {
 void handleApConfig() {
   if (server.method() == HTTP_GET) {
     String json = "{";
+    json.reserve(96);
     json += "\"ssid\":\"" + jsonEscape(String(cfg.ap_ssid)) + "\",";
     json += "\"pass\":\"" + jsonEscape(String(cfg.ap_pass)) + "\"";
     json += "}";
@@ -1074,16 +1134,19 @@ void handleApConfig() {
 void handleFactoryReset() {
   server.send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
   delay(500);
-  LittleFS.remove("/config.txt");
-  LittleFS.remove("/config.bak");
-  LittleFS.remove("/ota_state.bin");
-  LittleFS.remove(SLAVES_FILE);
-  LittleFS.remove("/slaves.bak");
+  if (ensureFSMounted(true)) {
+    LittleFS.remove("/config.txt");
+    LittleFS.remove("/config.bak");
+    LittleFS.remove("/ota_state.bin");
+    LittleFS.remove(SLAVES_FILE);
+    LittleFS.remove("/slaves.bak");
+  }
   ESP.restart();
 }
 
 void handleHvacState() {
   String json = "{";
+  json.reserve(128);
   json += "\"vendor\":\"" + jsonEscape(String(cfg.last_vendor)) + "\",";
   json += "\"mode\":\"" + jsonEscape(String(cfg.last_mode)) + "\",";
   json += "\"temp\":" + String(cfg.last_temp) + ",";
@@ -1095,6 +1158,7 @@ void handleHvacState() {
 
 void handleSystemInfo() {
   String json = "{";
+  json.reserve(256);
   json += "\"mac\":\"" + jsonEscape(WiFi.macAddress()) + "\",";
   json += "\"apMac\":\"" + jsonEscape(WiFi.softAPmacAddress()) + "\",";
   json += "\"chipId\":\"" + jsonEscape(String(ESP.getChipId(), HEX)) + "\",";
@@ -1133,6 +1197,7 @@ void handleSlaves() {
   refreshSlaveListFromSDK();
   unsigned long now = millis();
   String json = "{\"slaves\":[";
+  json.reserve(512);
   bool first = true;
   for (int i = 0; i < MAX_SLAVES; i++) {
     if (slaves[i].mac[0] != '\0' && slaves[i].lastSeen != 0 &&
@@ -1220,6 +1285,7 @@ void handleSlaveConfig() {
 void handleDeviceConfig() {
   if (server.method() == HTTP_GET) {
     String json = "{";
+    json.reserve(128);
     json += "\"name\":\"" + jsonEscape(String(cfg.device_name)) + "\",";
     json += "\"icon\":\"" + jsonEscape(String(cfg.device_icon)) + "\",";
     json += "\"floor\":\"" + jsonEscape(String(cfg.device_floor)) + "\"";
@@ -1365,6 +1431,7 @@ void handleMasterUdpReceive() {
 void handleMqttConfig() {
   if (server.method() == HTTP_GET) {
     String json = "{";
+    json.reserve(192);
     json += "\"host\":\"" + jsonEscape(String(cfg.mqtt_host)) + "\",";
     json += "\"port\":" + String(cfg.mqtt_port) + ",";
     json += "\"user\":\"" + jsonEscape(String(cfg.mqtt_user)) + "\",";
@@ -1402,6 +1469,7 @@ void handleMqttConfig() {
 // ===== 注册所有 API 路由 =====
 void handleSensorStatus() {
   String json = "{";
+  json.reserve(80);
   json += "\"temp\":" + (sensorPresent && roomTempC > -100.0 ? String(roomTempC, 1) : "null") + ",";
   json += "\"motion\":" + String(pirDetected ? "true" : "false") + ",";
   json += "\"sensor_present\":" + String(sensorPresent ? "true" : "false");
@@ -1459,22 +1527,217 @@ uint32_t readLe32(const uint8_t* p) {
            ((uint32_t)p[3] << 24);
 }
 
+void otaVerifyReason(char* reason, size_t reasonLen, const char* msg) {
+    if (!reason || reasonLen == 0) return;
+    strncpy(reason, msg, reasonLen - 1);
+    reason[reasonLen - 1] = '\0';
+}
+
+bool otaRangeWithin(uint32_t offset, uint32_t len, uint32_t imageSize) {
+    return offset <= imageSize && len <= imageSize - offset;
+}
+
+bool otaIsIromAddress(uint32_t addr) {
+    return addr >= OTA_IROM_BASE && addr < OTA_IROM_LIMIT;
+}
+
+bool flashReadBytes(uint32_t addr, uint8_t* out, size_t len) {
+#if IRAC_RBOOT_OTA
+    if (!out && len > 0) return false;
+    while (len > 0) {
+        uint32_t alignedAddr = addr & ~0x03UL;
+        uint32_t word = 0xFFFFFFFF;
+        noInterrupts();
+        bool ok = (spi_flash_read(alignedAddr, &word, sizeof(word)) == SPI_FLASH_RESULT_OK);
+        interrupts();
+        if (!ok) return false;
+
+        uint8_t off = (uint8_t)(addr & 0x03);
+        size_t copy = min((size_t)(4 - off), len);
+        memcpy(out, ((uint8_t*)&word) + off, copy);
+        out += copy;
+        addr += copy;
+        len -= copy;
+    }
+    return true;
+#else
+    (void)addr;
+    (void)out;
+    (void)len;
+    return false;
+#endif
+}
+
+bool flashXorBytes(uint32_t addr, uint32_t len, uint8_t& checksum) {
+#if IRAC_RBOOT_OTA
+    uint8_t one = 0;
+    while (len > 0 && (addr & 0x03)) {
+        if (!flashReadBytes(addr, &one, 1)) return false;
+        checksum ^= one;
+        addr++;
+        len--;
+    }
+
+    uint32_t buf[64];  // 256 bytes, aligned for spi_flash_read.
+    while (len >= sizeof(buf)) {
+        noInterrupts();
+        bool ok = (spi_flash_read(addr, buf, sizeof(buf)) == SPI_FLASH_RESULT_OK);
+        interrupts();
+        if (!ok) return false;
+        uint8_t* bytes = (uint8_t*)buf;
+        for (size_t i = 0; i < sizeof(buf); i++) checksum ^= bytes[i];
+        addr += sizeof(buf);
+        len -= sizeof(buf);
+        yield();
+    }
+
+    while (len >= 4) {
+        uint32_t word = 0;
+        noInterrupts();
+        bool ok = (spi_flash_read(addr, &word, sizeof(word)) == SPI_FLASH_RESULT_OK);
+        interrupts();
+        if (!ok) return false;
+        uint8_t* bytes = (uint8_t*)&word;
+        for (uint8_t i = 0; i < 4; i++) checksum ^= bytes[i];
+        addr += 4;
+        len -= 4;
+    }
+
+    while (len > 0) {
+        if (!flashReadBytes(addr, &one, 1)) return false;
+        checksum ^= one;
+        addr++;
+        len--;
+    }
+    return true;
+#else
+    (void)addr;
+    (void)len;
+    (void)checksum;
+    return false;
+#endif
+}
+
+bool validateRbootImageInFlash(uint32_t baseAddr, uint32_t imageSize,
+                               char* reason, size_t reasonLen) {
+    if (imageSize < 16 || imageSize > OTA_SLOT_MAX_SIZE) {
+        otaVerifyReason(reason, reasonLen, "invalid image size");
+        return false;
+    }
+
+    uint8_t hdr[16];
+    if (!flashReadBytes(baseAddr, hdr, sizeof(hdr))) {
+        otaVerifyReason(reason, reasonLen, "flash read failed");
+        return false;
+    }
+    if (hdr[0] != OTA_RBOOT_MAGIC_NEW1 || hdr[1] != OTA_RBOOT_MAGIC_NEW2) {
+        otaVerifyReason(reason, reasonLen, "invalid rboot image magic");
+        return false;
+    }
+    if (hdr[2] != OTA_FLASH_MODE_DOUT) {
+        otaVerifyReason(reason, reasonLen, "invalid flash mode");
+        return false;
+    }
+
+    uint32_t entry = readLe32(hdr + 4);
+    uint32_t iromAdd = readLe32(hdr + 8);
+    uint32_t iromLen = readLe32(hdr + 12);
+    if (iromAdd != 0 || iromLen == 0 || !otaRangeWithin(16, iromLen, imageSize)) {
+        otaVerifyReason(reason, reasonLen, "invalid IROM layout");
+        return false;
+    }
+
+    uint32_t normalOff = 16 + iromLen;
+    if (!otaRangeWithin(normalOff, 8, imageSize)) {
+        otaVerifyReason(reason, reasonLen, "missing RAM image header");
+        return false;
+    }
+
+    uint8_t appHdr[8];
+    if (!flashReadBytes(baseAddr + normalOff, appHdr, sizeof(appHdr))) {
+        otaVerifyReason(reason, reasonLen, "RAM header read failed");
+        return false;
+    }
+    if (appHdr[0] != 0xE9 || appHdr[2] != OTA_FLASH_MODE_DOUT || readLe32(appHdr + 4) != entry) {
+        otaVerifyReason(reason, reasonLen, "invalid RAM image header");
+        return false;
+    }
+
+    uint8_t sectionCount = appHdr[1];
+    if (sectionCount == 0 || sectionCount > 16) {
+        otaVerifyReason(reason, reasonLen, "invalid section count");
+        return false;
+    }
+
+    uint32_t pos = normalOff + 8;
+    uint8_t checksum = OTA_IMAGE_CHECKSUM_INIT;
+    for (uint8_t i = 0; i < sectionCount; i++) {
+        if (!otaRangeWithin(pos, 8, imageSize)) {
+            otaVerifyReason(reason, reasonLen, "missing section header");
+            return false;
+        }
+        uint8_t secHdr[8];
+        if (!flashReadBytes(baseAddr + pos, secHdr, sizeof(secHdr))) {
+            otaVerifyReason(reason, reasonLen, "section header read failed");
+            return false;
+        }
+        uint32_t sectionAddr = readLe32(secHdr);
+        uint32_t sectionLen = readLe32(secHdr + 4);
+        pos += 8;
+
+        if (sectionLen == 0 || otaIsIromAddress(sectionAddr) ||
+            !otaRangeWithin(pos, sectionLen, imageSize)) {
+            otaVerifyReason(reason, reasonLen, "invalid RAM section layout");
+            return false;
+        }
+        if (!flashXorBytes(baseAddr + pos, sectionLen, checksum)) {
+            otaVerifyReason(reason, reasonLen, "section checksum read failed");
+            return false;
+        }
+        pos += sectionLen;
+    }
+
+    uint32_t checksumPos = pos | 0x0F;
+    if (!otaRangeWithin(checksumPos, 1, imageSize)) {
+        otaVerifyReason(reason, reasonLen, "missing image checksum");
+        return false;
+    }
+    uint8_t storedChecksum = 0;
+    if (!flashReadBytes(baseAddr + checksumPos, &storedChecksum, 1)) {
+        otaVerifyReason(reason, reasonLen, "checksum read failed");
+        return false;
+    }
+    if (storedChecksum != checksum) {
+        otaVerifyReason(reason, reasonLen, "image checksum mismatch");
+        return false;
+    }
+    if (imageSize != checksumPos + 1) {
+        otaVerifyReason(reason, reasonLen, "unexpected trailing data");
+        return false;
+    }
+    return true;
+}
+
 bool otaImageHeaderValid(const uint8_t* data, size_t len) {
     if (!data || len < 16) {
         otaReject("image header too short");
         return false;
     }
 
-    if (data[0] != 0xE9) {
-        otaReject("invalid ESP8266 image magic");
+    if (data[0] != OTA_RBOOT_MAGIC_NEW1 || data[1] != OTA_RBOOT_MAGIC_NEW2) {
+        if (data[0] == 0xE9 && len >= 16 && readLe32(data + 8) == OTA_APP_FIRST_SECTION) {
+            otaReject("old OTA image format; regenerate flash_images/rom0.bin or rom1.bin");
+        } else {
+            otaReject("invalid rboot OTA image magic");
+        }
         return false;
     }
 
-    uint8_t segmentCount = data[1];
     uint8_t flashMode = data[2];
-    uint32_t firstSection = readLe32(data + 8);
-    if (segmentCount < 3 || segmentCount > 16 || firstSection != OTA_APP_FIRST_SECTION) {
-        otaReject("upload stripped OTA app image: firmware-rom0/rom1-*.bin or flash_images/rom0.bin/rom1.bin");
+    uint32_t iromAdd = readLe32(data + 8);
+    uint32_t iromLen = readLe32(data + 12);
+    if (iromAdd != 0 || iromLen == 0 || iromLen >= OTA_SLOT_MAX_SIZE - 16) {
+        otaReject("invalid rboot OTA image layout");
         return false;
     }
     if (flashMode != OTA_FLASH_MODE_DOUT) {
@@ -1565,12 +1828,29 @@ void otaFinishHandler() {
         return;
     }
 
+    char verifyReason[96] = "";
+    if (!validateRbootImageInFlash(otaTargetAddr, otaUploadSize,
+                                   verifyReason, sizeof(verifyReason))) {
+        String msg = "OTA image verify failed";
+        if (strlen(verifyReason) > 0) {
+            msg += ": ";
+            msg += verifyReason;
+        }
+        server.send(400, "text/plain", msg);
+        return;
+    }
+    Serial.printf("[OTA] Image verified in flash: %u bytes\n", otaUploadSize);
+
     otaState.magic = OTA_STATE_MAGIC;
     otaState.version = OTA_STATE_VERSION;
     otaState.pending = true;
     otaState.previous_rom = rboot_get_current_rom();
     otaState.timestamp = millis();
 
+    if (!ensureFSMounted(true)) {
+        server.send(500, "text/plain", "OTA state FS unavailable");
+        return;
+    }
     File f = LittleFS.open("/ota_state.bin", "w");
     if (!f) {
         server.send(500, "text/plain", "OTA state write failed");
@@ -1595,6 +1875,7 @@ void handleOTAStatus() {
     uint8_t target = rboot_get_target_rom();
     rboot_config conf = rboot_get_config();
     String json = "{\"ok\":true,\"current_rom\":";
+    json.reserve(256);
     json += String(cur);
     json += ",\"target_rom\":";
     json += String(target);
@@ -1617,6 +1898,10 @@ void handleOTAStatus() {
 }
 
 void loadOTAState() {
+    if (!ensureFSMounted(false)) {
+        otaState = {OTA_STATE_MAGIC, OTA_STATE_VERSION, false, 0, 0};
+        return;
+    }
     File f = LittleFS.open("/ota_state.bin", "r");
     if (f && f.size() == sizeof(otaState)) {
         f.read((uint8_t*)&otaState, sizeof(otaState));
@@ -1633,6 +1918,7 @@ void loadOTAState() {
 
 void clearOTAState() {
     otaState = {OTA_STATE_MAGIC, OTA_STATE_VERSION, false, 0, 0};
+    if (!ensureFSMounted(true)) return;
     File f = LittleFS.open("/ota_state.bin", "w");
     if (f) { f.write((uint8_t*)&otaState, sizeof(otaState)); f.close(); }
 }
@@ -1647,7 +1933,7 @@ bool rollbackPendingOTA(const char* reason) {
     Serial.printf("[OTA] Rollback: %s\n", reason);
     uint8_t prev = otaState.previous_rom;
     clearOTAState();
-    LittleFS.remove("/ota_boots.txt");
+    if (ensureFSMounted(false)) LittleFS.remove("/ota_boots.txt");
     rboot_set_current_rom(prev);
     delay(100);
     ESP.restart();
@@ -1671,12 +1957,16 @@ void checkOTARollback() {
                             rst->reason == REASON_SOFT_WDT_RST));
     uint8_t otaBoots = 0;
     if (isCrash) {
-      File bf = LittleFS.open("/ota_boots.txt", "r");
-      if (bf) { otaBoots = (uint8_t)bf.parseInt(); bf.close(); }
-      otaBoots++;
-      bf = LittleFS.open("/ota_boots.txt", "w");
-      if (bf) { bf.println(otaBoots); bf.close(); }
-      Serial.printf("[OTA] Crash boot #%d since OTA (max %d)\n", otaBoots, OTA_MAX_CRASH_BOOTS);
+      if (ensureFSMounted(false)) {
+        File bf = LittleFS.open("/ota_boots.txt", "r");
+        if (bf) { otaBoots = (uint8_t)bf.parseInt(); bf.close(); }
+        otaBoots++;
+        bf = LittleFS.open("/ota_boots.txt", "w");
+        if (bf) { bf.println(otaBoots); bf.close(); }
+        Serial.printf("[OTA] Crash boot #%d since OTA (max %d)\n", otaBoots, OTA_MAX_CRASH_BOOTS);
+      } else {
+        Serial.println("[OTA] Crash boot counter skipped: LittleFS unavailable");
+      }
     } else {
       Serial.printf("[OTA] Clean reset, crash counter unchanged\n");
     }
@@ -1685,7 +1975,7 @@ void checkOTARollback() {
         uint8_t prev = otaState.previous_rom;
         Serial.printf("[OTA] Too many crash boots, rolling back to ROM %d\n", prev);
         clearOTAState();
-        LittleFS.remove("/ota_boots.txt");
+        if (ensureFSMounted(false)) LittleFS.remove("/ota_boots.txt");
         rboot_set_current_rom(prev);
         delay(100);
         ESP.restart();
@@ -1695,7 +1985,7 @@ void checkOTARollback() {
         Serial.printf("[OTA] Critical low heap: %u, rollback!\n", ESP.getFreeHeap());
         uint8_t prev = otaState.previous_rom;
         clearOTAState();
-        LittleFS.remove("/ota_boots.txt");
+        if (ensureFSMounted(false)) LittleFS.remove("/ota_boots.txt");
         rboot_set_current_rom(prev);
         delay(100);
         ESP.restart();
@@ -1726,7 +2016,7 @@ void checkOTARollback() {
         uint8_t prev = otaState.previous_rom;
         Serial.printf("[OTA] Rolling back to ROM %d\n", prev);
         clearOTAState();
-        LittleFS.remove("/ota_boots.txt");
+        if (ensureFSMounted(false)) LittleFS.remove("/ota_boots.txt");
         rboot_set_current_rom(prev);
         delay(100);
         ESP.restart();
@@ -1739,7 +2029,7 @@ void confirmOTAIfReady() {
 
     Serial.println("[OTA] Stable run reached, update confirmed");
     clearOTAState();
-    LittleFS.remove("/ota_boots.txt");
+    if (ensureFSMounted(false)) LittleFS.remove("/ota_boots.txt");
     otaConfirmAt = 0;
 }
 
@@ -1814,51 +2104,53 @@ void mqttPublishDiscovery() {
   String base = mqttTopicBase();
   String chipId = String(ESP.getChipId(), HEX);
   String devName = strlen(cfg.device_name) > 0 ? jsonEscape(String(cfg.device_name)) : String("IR AC");
-  String disc = String()
-    + "{"
-    + "\"name\":\"" + devName + "\","
-    + "\"unique_id\":\"ir-ac-" + chipId + "\","
-    + "\"icon\":\"mdi:air-conditioner\","
-    + "\"availability_topic\":\"" + base + "/availability\","
-    + "\"payload_available\":\"online\","
-    + "\"payload_not_available\":\"offline\","
-    + "\"mode_command_topic\":\"" + base + "/mode/set\","
-    + "\"mode_state_topic\":\"" + base + "/mode_state\","
-    + "\"action_topic\":\"" + base + "/action\","
-    + "\"modes\":[\"off\",\"cool\",\"heat\",\"fan_only\",\"dry\",\"auto\"],"
-    + "\"temperature_command_topic\":\"" + base + "/temperature/set\","
-    + "\"temperature_state_topic\":\"" + base + "/temperature_state\","
-    + "\"min_temp\":16,\"max_temp\":30,\"temp_step\":1,"
-    + "\"fan_mode_command_topic\":\"" + base + "/fan/set\","
-    + "\"fan_mode_state_topic\":\"" + base + "/fan_state\","
-    + "\"fan_modes\":[\"auto\",\"low\",\"medium\",\"high\"],"
-    + "\"current_temperature_topic\":\"" + base + "/current_temperature\","
-    + "\"precision\":1.0,"
-    + "\"device\":{"
-        + "\"identifiers\":[\"ir-ac-" + chipId + "\"],"
-        + "\"name\":\"" + devName + "\","
-        + "\"manufacturer\":\"DIY\","
-        + "\"model\":\"IR Mini V105\","
-        + "\"sw_version\":\"2.0\""
-    + "}"
-    + "}";
+  String disc;
+  disc.reserve(900);
+  disc += "{";
+  disc += "\"name\":\"" + devName + "\",";
+  disc += "\"unique_id\":\"ir-ac-" + chipId + "\",";
+  disc += "\"icon\":\"mdi:air-conditioner\",";
+  disc += "\"availability_topic\":\"" + base + "/availability\",";
+  disc += "\"payload_available\":\"online\",";
+  disc += "\"payload_not_available\":\"offline\",";
+  disc += "\"mode_command_topic\":\"" + base + "/mode/set\",";
+  disc += "\"mode_state_topic\":\"" + base + "/mode_state\",";
+  disc += "\"action_topic\":\"" + base + "/action\",";
+  disc += "\"modes\":[\"off\",\"cool\",\"heat\",\"fan_only\",\"dry\",\"auto\"],";
+  disc += "\"temperature_command_topic\":\"" + base + "/temperature/set\",";
+  disc += "\"temperature_state_topic\":\"" + base + "/temperature_state\",";
+  disc += "\"min_temp\":16,\"max_temp\":30,\"temp_step\":1,";
+  disc += "\"fan_mode_command_topic\":\"" + base + "/fan/set\",";
+  disc += "\"fan_mode_state_topic\":\"" + base + "/fan_state\",";
+  disc += "\"fan_modes\":[\"auto\",\"low\",\"medium\",\"high\"],";
+  disc += "\"current_temperature_topic\":\"" + base + "/current_temperature\",";
+  disc += "\"precision\":1.0,";
+  disc += "\"device\":{";
+  disc += "\"identifiers\":[\"ir-ac-" + chipId + "\"],";
+  disc += "\"name\":\"" + devName + "\",";
+  disc += "\"manufacturer\":\"DIY\",";
+  disc += "\"model\":\"IR Mini V105\",";
+  disc += "\"sw_version\":\"2.0\"";
+  disc += "}";
+  disc += "}";
   mqtt.publish(("homeassistant/climate/ir-ac-" + chipId + "/config").c_str(),
                  disc.c_str(), true);
 
   String motionName = strlen(cfg.device_name) > 0 ? jsonEscape(String(cfg.device_name)) + " Motion" : String("IR AC Motion");
-  String motionDisc = String()
-    + "{"
-    + "\"name\":\"" + motionName + "\","
-    + "\"unique_id\":\"ir-ac-motion-" + chipId + "\","
-    + "\"state_topic\":\"" + base + "/motion\","
-    + "\"device_class\":\"motion\","
-    + "\"availability_topic\":\"" + base + "/availability\","
-    + "\"payload_available\":\"online\","
-    + "\"payload_not_available\":\"offline\","
-    + "\"device\":{"
-        + "\"identifiers\":[\"ir-ac-" + chipId + "\"]"
-    + "}"
-    + "}";
+  String motionDisc;
+  motionDisc.reserve(360);
+  motionDisc += "{";
+  motionDisc += "\"name\":\"" + motionName + "\",";
+  motionDisc += "\"unique_id\":\"ir-ac-motion-" + chipId + "\",";
+  motionDisc += "\"state_topic\":\"" + base + "/motion\",";
+  motionDisc += "\"device_class\":\"motion\",";
+  motionDisc += "\"availability_topic\":\"" + base + "/availability\",";
+  motionDisc += "\"payload_available\":\"online\",";
+  motionDisc += "\"payload_not_available\":\"offline\",";
+  motionDisc += "\"device\":{";
+  motionDisc += "\"identifiers\":[\"ir-ac-" + chipId + "\"]";
+  motionDisc += "}";
+  motionDisc += "}";
   mqtt.publish(("homeassistant/binary_sensor/ir-ac-" + chipId + "/config").c_str(),
                  motionDisc.c_str(), true);
 
@@ -1941,7 +2233,7 @@ bool mqttConnect() {
 }
 
 // ===== 从机逻辑 =====
-void slaveExecRaw(String data) {
+void slaveExecRaw(const String& data) {
   static uint16_t buf[512];  // 1KB — 改 static 避免栈爆（slaveExecRaw 不重入）
   int len = parseRaw(data, buf, 512);
   if (len == 0) return;
@@ -1956,7 +2248,7 @@ void slaveExecRaw(String data) {
   Serial.printf("[SLAVE] RAW len=%d\n", len);
 }
 
-void slaveExecHvac(String data) {
+void slaveExecHvac(const String& data) {
   // 格式: vendor,power,mode,temp,fan,swing  (power 为 "0"/"1")
   int c1 = data.indexOf(',');
   if (c1 < 0) return;
@@ -2008,7 +2300,7 @@ bool applyOfficePresetFromButton() {
   cfg.last_temp = (uint8_t)temp;
   copyToBuffer(cfg.last_fan, sizeof(cfg.last_fan), fan);
   cfg.last_power = power;
-  saveConfig();
+  scheduleConfigSave();
 
   if (deviceMode == MODE_AP_MASTER) {
     char msg[128];
@@ -2053,11 +2345,13 @@ void checkButton() {
           LED_ON(LED_YELLOW); delay(50);
           LED_OFF(LED_YELLOW); delay(50);
         }
-        LittleFS.remove("/config.txt");
-        LittleFS.remove("/config.bak");
-        LittleFS.remove("/ota_state.bin");
-        LittleFS.remove(SLAVES_FILE);
-        LittleFS.remove("/slaves.bak");
+        if (ensureFSMounted(true)) {
+          LittleFS.remove("/config.txt");
+          LittleFS.remove("/config.bak");
+          LittleFS.remove("/ota_state.bin");
+          LittleFS.remove(SLAVES_FILE);
+          LittleFS.remove("/slaves.bak");
+        }
         ESP.restart();
       } else if (elapsed >= 2000) {
         if ((millis() / 200) % 2 == 0) LED_ON(LED_YELLOW);
@@ -2203,21 +2497,15 @@ void setup() {
   LED_OFF(LED_RED);
   LED_OFF(LED_YELLOW);
   bootLedSelfTest();
-  LED_ON(LED_BLUE);  // 应用已进入 setup，后续阶段会继续更新状态灯
+  setStatusLeds(false, false, true);  // 已进入 setup，准备初始化配置/网络
 
   wifi_set_sleep_type(NONE_SLEEP_T);
   irSend.begin();
 
   // ===== 初始化文件系统 =====
-  blinkStatusLed(LED_BLUE, 1, 80, 80);
-  if (!LittleFS.begin()) {
-    Serial.println("[FS] LittleFS mount failed, formatting...");
-    blinkStatusLed(LED_RED, 2, 120, 120);
-    LittleFS.format();
-    if (!LittleFS.begin()) {
-      Serial.println("[FS] LittleFS still failed after format!");
-      blinkStatusLed(LED_RED, 8, 80, 80);
-    }
+  if (!ensureFSMounted(false)) {
+    Serial.println("[FS] LittleFS unavailable at boot; continuing with defaults");
+    blinkLedRestore(LED_RED, 2, 80, 80);
   }
 
 #if IRAC_RBOOT_OTA
@@ -2228,7 +2516,8 @@ void setup() {
 
   // ===== 加载配置 =====
   blinkStatusLed(LED_YELLOW, 1, 80, 80);
-  bool hasStoredConfig = LittleFS.exists("/config.txt") || LittleFS.exists("/config.bak");
+  bool hasStoredConfig = fsMounted &&
+                         (LittleFS.exists("/config.txt") || LittleFS.exists("/config.bak"));
   bool hasSTA = loadConfig();
   loadPairedSlaves();
   mqttEnabled = strlen(cfg.mqtt_host) > 0;
@@ -2464,6 +2753,7 @@ void loop() {
 
   confirmOTAIfReady();
   checkButton();
+  saveConfigIfDue();
 
   // 从机模式：UDP 监听
   if (deviceMode == MODE_STA_SLAVE) {

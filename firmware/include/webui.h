@@ -424,40 +424,65 @@ function otaSize(n){return n>1048576?(n/1048576).toFixed(2)+' MB':Math.ceil(n/10
 function otaMsg(t,cls){var m=$('ota-msg');if(m){m.textContent=t;m.className='ota-meta '+(cls||'ota-wait')}}
 function otaMeta(t,cls){var m=$('ota-file-meta');if(m){m.textContent=t;m.className='ota-meta '+(cls||'ota-wait')}}
 function otaLe32(a,o){return (a[o]|(a[o+1]<<8)|(a[o+2]<<16)|(a[o+3]<<24))>>>0}
-function otaAppHeadAt(a,o){return a.length>=o+16&&a[o]===0xE9&&a[o+1]>=3&&a[o+1]<=16&&otaLe32(a,o+8)===0x40202010}
-function otaAppAt(a,o){return otaAppHeadAt(a,o)&&a[o+2]===0x03}
+function otaRbootHeadAt(a,o){return a.length>=o+16&&a[o]===0xEA&&a[o+1]===0x04&&otaLe32(a,o+8)===0&&otaLe32(a,o+12)>0&&otaLe32(a,o+12)<0xFE000}
+function otaRbootAt(a,o){return otaRbootHeadAt(a,o)&&a[o+2]===0x03}
+function otaOldAppHeadAt(a,o){return a.length>=o+16&&a[o]===0xE9&&a[o+1]>=3&&a[o+1]<=16&&otaLe32(a,o+8)===0x40202010}
+function otaOldAppAt(a,o){return otaOldAppHeadAt(a,o)&&a[o+2]===0x03}
+function otaRbootInfo(a,o){
+  if(!otaRbootHeadAt(a,o))return{ok:false,err:'bad_head'};
+  if(a[o+2]!==0x03)return{ok:false,err:'bad_mode'};
+  var entry=otaLe32(a,o+4),ilen=otaLe32(a,o+12),n=o+16+ilen;
+  if(n+8>a.length)return{ok:false,err:'no_ram_header'};
+  if(a[n]!==0xE9||a[n+2]!==0x03||otaLe32(a,n+4)!==entry)return{ok:false,err:'bad_ram_header'};
+  var cnt=a[n+1];if(cnt<1||cnt>16)return{ok:false,err:'bad_section_count'};
+  var pos=n+8,cs=0xEF;
+  for(var i=0;i<cnt;i++){
+    if(pos+8>a.length)return{ok:false,err:'no_section_header'};
+    var addr=otaLe32(a,pos),len=otaLe32(a,pos+4);pos+=8;
+    if(!len||(addr>=0x40200000&&addr<0x40300000)||pos+len>a.length)return{ok:false,err:'bad_section'};
+    for(var j=0;j<len;j++)cs^=a[pos+j];
+    pos+=len;
+  }
+  var cp=pos|15;if(cp>=a.length)return{ok:false,err:'no_checksum'};
+  if(a[cp]!==cs)return{ok:false,err:'checksum'};
+  if(a.length!==cp+1)return{ok:false,err:'trailing'};
+  return{ok:true,irom:ilen,sections:cnt};
+}
 function otaSetReady(ok){otaFileOk=ok;var b=$('ota-btn');if(b){b.disabled=!ok;b.textContent=ok?'确认上传到 ROM '+otaTargetRom:'选择 OTA 固件'}}
 function otaValidateFile(file,done){
   otaSetReady(false);
   if(!otaSupported){otaMeta('Factory 版不支持 Web OTA。','ota-bad');otaMsg('请用 USB-TTL 直刷 factory 固件。','ota-bad');done&&done(false);return}
   if(!file){otaMeta('未选择文件。选中文件后会先在浏览器里验头。','ota-wait');otaMsg('请选择 firmware-rom'+otaTargetRom+'-*.bin 或 '+otaTargetFile,'ota-bad');done&&done(false);return}
   otaMeta('已选择：'+file.name+'（'+otaSize(file.size)+'）','ota-wait');
-  if(file.size>0xFE000){otaMsg('文件超过 OTA 分区大小。请选择剥 eboot 头后的 rom'+otaTargetRom+'.bin，不要上传 combined.bin。','ota-bad');done&&done(false);return}
+  if(file.size>0xFE000){otaMsg('文件超过 OTA 分区大小。请选择 rboot OTA 镜像 rom'+otaTargetRom+'.bin，不要上传 combined.bin。','ota-bad');done&&done(false);return}
   var rd=new FileReader();
   rd.onerror=function(){otaMsg('无法读取文件，请重新选择','ota-bad');done&&done(false)};
   rd.onload=function(){
     var a=new Uint8Array(rd.result);
-    if(otaAppAt(a,0)){
-      otaMeta('校验通过：ESP8266 应用镜像，首段地址 0x40202010。','ota-ok');
+    var info=otaRbootInfo(a,0);
+    if(info.ok){
+      otaMeta('校验通过：rboot OTA 镜像，checksum 正确。','ota-ok');
       otaMsg('可以上传。将写入 ROM '+otaTargetRom+'，重启后稳定运行约 25 秒才确认升级。','ota-ok');
       otaSetReady(true);done&&done(true);return;
     }
-    if(otaAppHeadAt(a,0)&&a[2]!==0x03){
-      otaMsg('这个应用镜像不是 DOUT flash mode。本板必须使用 DOUT，请重新构建或运行 prepare_flash.py。','ota-bad');
+    if(otaRbootHeadAt(a,0)&&a[2]!==0x03){
+      otaMsg('这个 OTA 镜像不是 DOUT flash mode。本板必须使用 DOUT，请重新构建或运行 prepare_flash.py。','ota-bad');
     }else
-    if(otaAppAt(a,0x1000)){
+    if(otaOldAppAt(a,0)){
+      otaMsg('这是旧版剥 eboot 镜像，会导致 rboot 启动异常。请重新运行 prepare_flash.py 后上传 '+otaTargetFile+'。','ota-bad');
+    }else if(otaOldAppAt(a,0x1000)){
       otaMsg('这是 PlatformIO firmware.bin，前面带 eboot 头。请运行 prepare_flash.py 后上传 '+otaTargetFile+'。','ota-bad');
-    }else if(otaAppAt(a,0x2000)){
+    }else if(otaRbootAt(a,0x2000)||otaOldAppAt(a,0x2000)){
       otaMsg('这是 combined.bin，首刷/救砖才写 0x0。OTA 请上传 firmware-rom'+otaTargetRom+'-*.bin 或 '+otaTargetFile+'。','ota-bad');
-    }else if(a.length>=16&&a[0]===0xE9){
+    }else if(a.length>=16&&(a[0]===0xE9||a[0]===0xEA)){
       otaMsg('这是 ESP 镜像，但不是本项目 OTA 应用镜像。不要上传 rboot.bin 或其他 bootloader。','ota-bad');
     }else{
-      otaMsg('文件格式不匹配；OTA 只接受剥 eboot 头的应用镜像','ota-bad');
+      otaMsg('文件格式不匹配；OTA 只接受 prepare_flash.py 生成的 rboot 应用镜像','ota-bad');
     }
     otaMeta('校验失败：不会上传，也不会写入 flash。','ota-bad');
     done&&done(false);
   };
-  rd.readAsArrayBuffer(file.slice(0,Math.min(file.size,0x2010)));
+  rd.readAsArrayBuffer(file);
 }
 (function(){
   var f=$('ota-form'),inp=$('ota-file');if(!f||!inp)return;

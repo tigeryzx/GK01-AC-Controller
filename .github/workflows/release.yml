@@ -39,7 +39,7 @@ jobs:
         run: pio run -e rom1
         working-directory: firmware
 
-      - name: Strip eboot from firmware
+      - name: Generate rboot OTA images
         run: python prepare_flash.py both
         working-directory: firmware
 
@@ -71,12 +71,13 @@ jobs:
             | 文件 | 用途 |
             |------|------|
             | `combined-${{ github.ref_name }}.bin` | **首刷/救砖首选**：rboot + rboot config + ROM0，一条 esptool 命令刷到 `0x0` |
-            | `firmware-rom0-${{ github.ref_name }}.bin` | 已剥 eboot 的 ROM0 应用镜像；WebUI 显示“准备写入 ROM0”时上传 |
-            | `firmware-rom1-${{ github.ref_name }}.bin` | 已剥 eboot 的 ROM1 应用镜像；WebUI 显示“准备写入 ROM1”时上传 |
+            | `firmware-rom0-${{ github.ref_name }}.bin` | rboot OTA 应用镜像（`EA 04` new image）；WebUI 显示“准备写入 ROM0”时上传 |
+            | `firmware-rom1-${{ github.ref_name }}.bin` | rboot OTA 应用镜像（`EA 04` new image）；WebUI 显示“准备写入 ROM1”时上传 |
             | `rboot-${{ github.ref_name }}.bin` | 仅 rboot 引导器；高级分步刷写时写到 `0x0000` |
             | `SHA256SUMS.txt` | 发布文件校验值 |
 
             **不要把 `firmware-rom0/rom1` 用 esptool 写到 `0x0`。** 这两个文件是 OTA 应用镜像，不是完整首刷镜像。
+            当前 ROM0/ROM1 OTA 包采用 slot-independent 设计，设备会根据当前运行分区自动写入 inactive slot；WebUI 的“准备写入 ROM”是操作提示，不是让用户手动指定 flash 地址。
 
             ---
 
@@ -128,9 +129,9 @@ jobs:
             3. 页面验证通过后点上传，等待 ~30 秒，设备自动重启
             4. 新固件写入另一个分区，启动失败自动回退到旧版本（不会变砖）
 
-            OTA 页面和固件端都会校验镜像：必须是已剥 eboot 的 ESP8266 应用镜像，首段地址为 `0x40202010`，flash mode 为 `DOUT(0x03)`，大小不能超过单个 ROM slot。
+            OTA 页面和固件端都会校验镜像：必须是 `prepare_flash.py` 生成的 rboot OTA 应用镜像（`EA 04` new image），flash mode 为 `DOUT(0x03)`，rboot new image 布局正确，内部 checksum 匹配，大小不能超过单个 ROM slot。固件端写入后还会从 flash 回读校验，通过后才切换 ROM。
 
-            > 不要上传 `combined.bin`、`rboot.bin` 或 `.pio/build/.../firmware.bin`。如果误传导致设备进不了应用代码，软件回滚无法执行，需要用 USB-TTL 重新刷 `combined-${{ github.ref_name }}.bin` 到 `0x0`。
+            > 不要上传 `combined.bin`、`rboot.bin`、`.pio/build/.../firmware.bin` 或旧版只剥 eboot 的 `E9` 应用镜像。如果误传导致设备进不了应用代码，软件回滚无法执行，需要用 USB-TTL 重新刷 `combined-${{ github.ref_name }}.bin` 到 `0x0`。
 
             ---
 
@@ -138,9 +139,9 @@ jobs:
 
             - 修复 rboot 双分区首刷镜像布局：`0x0000 rboot`、`0x1000 rboot config`、`0x2000 ROM0`
             - 固定 ROM 地址：ROM0=`0x2000`，ROM1=`0x102000`
-            - 发布包中的 `firmware-rom0/rom1` 均改为已剥 eboot 的 OTA 应用镜像
+            - 发布包中的 `firmware-rom0/rom1` 均改为 rboot `EA 04` new image，修复旧 `E9` 镜像导致 `Fatal exception (3), excvaddr=0x40202010` 的启动崩溃
             - WebUI OTA 页面动态显示当前 ROM 和准备写入 ROM，不再写死 ROM1
-            - 增加 OTA 上传前校验和固件端二次校验，减少刷错包导致无法启动的风险
+            - 增加 OTA 上传前 checksum 校验和固件端写后回读校验，减少刷错包导致无法启动的风险
             - 默认 AP 名称统一为 `IR-AC`
             - 首页默认进入空调页，底部导航调整为：空调 / 遥控 / 设备 / 学习 / 设置
             - 增加 LED 状态反馈：启动、AP 就绪、OTA pending、配对、红外活动

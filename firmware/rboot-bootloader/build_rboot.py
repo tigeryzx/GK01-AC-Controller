@@ -212,12 +212,11 @@ def generate_esp_image(elf_path, output_path, sections, flash_mode=3, flash_size
     for b in all_data:
         chksum ^= b
 
-    # The checksum is placed at byte position aligned to 16,
-    # after all segments. But the actual format has the checksum
-    # at the very end of the padded segment data.
-    # esptool2 places it after rounding up to 16 bytes
-    padded_len = (len(image) + 15) & ~15
-    image.extend(b'\xFF' * (padded_len - len(image)))
+    # ESP8266 images store the checksum at offset (end_of_segments | 0x0f).
+    # When segment data already ends on a 16-byte boundary this still requires
+    # 15 bytes of padding before the checksum byte.
+    checksum_pos = len(image) | 0x0F
+    image.extend(b'\xFF' * (checksum_pos - len(image)))
     image.append(chksum)
 
     with open(output_path, "wb") as f:

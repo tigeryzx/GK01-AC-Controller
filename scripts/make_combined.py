@@ -16,6 +16,10 @@ RBOOT_MAX_SIZE = 0x2000
 RBOOT_CONFIG_OFFSET = 0x1000
 ROM0_ADDRESS = 0x002000
 ROM1_ADDRESS = 0x102000
+ESP_IMAGE_MAGIC = 0xE9
+RBOOT_IMAGE_MAGIC_NEW1 = 0xEA
+RBOOT_IMAGE_MAGIC_NEW2 = 0x04
+ESP_IMAGE_CHECKSUM_INIT = 0xEF
 
 
 def make_rboot_config():
@@ -27,6 +31,33 @@ def make_rboot_config():
     return sector
 
 
+def normalize_esp8266_checksum(image):
+    if len(image) < 8 or image[0] != ESP_IMAGE_MAGIC:
+        return False
+
+    segment_count = image[1]
+    pos = 8
+    checksum = ESP_IMAGE_CHECKSUM_INIT
+    for _ in range(segment_count):
+        if pos + 8 > len(image):
+            return False
+        length = struct.unpack_from("<I", image, pos + 4)[0]
+        pos += 8
+        if pos + length > len(image):
+            return False
+        for b in image[pos:pos + length]:
+            checksum ^= b
+        pos += length
+
+    checksum_pos = pos | 0x0F
+    if len(image) <= checksum_pos:
+        image.extend(b"\xff" * (checksum_pos + 1 - len(image)))
+    else:
+        del image[checksum_pos + 1:]
+    image[checksum_pos] = checksum
+    return True
+
+
 def main():
     if not RBOOT.exists():
         print(f"ERROR: {RBOOT} not found. Build rboot first.")
@@ -35,8 +66,16 @@ def main():
         print(f"ERROR: {ROM0} not found. Run prepare_flash.py first.")
         sys.exit(1)
 
-    rboot_data = RBOOT.read_bytes()
+    rboot_data = bytearray(RBOOT.read_bytes())
     rom0_data = ROM0.read_bytes()
+
+    if not normalize_esp8266_checksum(rboot_data):
+        print(f"ERROR: unable to normalize rboot checksum: {RBOOT}")
+        sys.exit(1)
+
+    if len(rom0_data) < 2 or rom0_data[0] != RBOOT_IMAGE_MAGIC_NEW1 or rom0_data[1] != RBOOT_IMAGE_MAGIC_NEW2:
+        print(f"ERROR: {ROM0} is not an rboot new image (expected EA 04). Run firmware/prepare_flash.py first.")
+        sys.exit(1)
 
     if len(rboot_data) > RBOOT_MAX_SIZE:
         print(f"ERROR: rboot.bin too large: {len(rboot_data)} > {RBOOT_MAX_SIZE}")
