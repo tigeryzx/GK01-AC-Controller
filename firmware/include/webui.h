@@ -178,8 +178,8 @@ select{background:var(--card);color:var(--text)}
 .prog-bar{height:100%;background:var(--blue);width:0;transition:width .15s;border-radius:3px}
 .prog-bar.err{background:var(--red)}
 .prog-stat{font-size:13px;color:var(--text3);margin-top:4px;text-align:center}
-.theme-btn{position:fixed;top:12px;right:14px;z-index:60;width:30px;height:30px;border-radius:50%;
-border:none;background:rgba(0,0,0,.06);font-size:15px;cursor:pointer;line-height:1;padding:0;
+.theme-btn{position:fixed;top:10px;right:12px;z-index:60;width:36px;height:36px;border-radius:50%;
+border:none;background:rgba(0,0,0,.06);font-size:22px;cursor:pointer;line-height:1;padding:0;
 display:flex;align-items:center;justify-content:center;transition:transform .12s}
 .theme-btn:active{transform:scale(.9)}
 @media(prefers-color-scheme:dark){.theme-btn{background:rgba(255,255,255,.1)}}
@@ -388,7 +388,7 @@ body{background:var(--bg);color:var(--text)}
 <div style="font-size:13px;color:var(--text3);line-height:1.45">短按：格力制冷 26°C 一键开/关。长按 5 秒：恢复出厂设置。</div>
 </div></div>
 <div class="cd"><div class="cd-h">关于</div>
-<div class="it"><span>版本</span><span style="color:var(--gray)">v2.4</span></div>
+<div class="it"><span>版本</span><span style="color:var(--gray)">v3.0</span></div>
 <div class="it"><span>MAC</span><span id="sys-mac" style="color:var(--gray)">--</span></div>
 <div class="it"><span>设备</span><span style="color:var(--gray)">IR Mini V105</span></div>
 <div class="it"><span>协议库</span><span style="color:var(--gray)">IRremoteESP8266</span></div>
