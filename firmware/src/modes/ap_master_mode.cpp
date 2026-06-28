@@ -6,33 +6,36 @@
 #include "hw/sensor_service.h"
 #include "hw/led_manager.h"
 #include "config/config_store.h"
+#include "ota/ota_manager.h"
 
 void ApMasterMode::onEnter() {
     Serial.println(F("[AP_MASTER] onEnter"));
 
     leds.setAll(false, false, true);
 
-    if (!network.beginAP(getApSsid(), getApPass())) {
+    bool apStarted = network.beginAP(getApSsid(), getApPass());
+    if (!apStarted) {
         Serial.println(F("[AP_MASTER] start failed"));
-        return;
     }
 
-    web.beginAP();
-    web.startCaptivePortal();
-    web.registerApiRoutes();
+    if (apStarted) {
+        web.beginAP();
+        web.startCaptivePortal();
+        web.registerApiRoutes();
+        ir.enableRx();
+        udp.beginMaster();
+        sensors.begin();
+        udp.broadcast("BOOT:");
 
-    ir.enableRx();
-    udp.beginMaster();
-    sensors.begin();
-
-    udp.broadcast("BOOT:");
-
-    for (int i = 0; i < 3; i++) {
-        leds.setBlue(true);  delay(100);
-        leds.setBlue(false); delay(100);
+        for (int i = 0; i < 3; i++) {
+            leds.setBlue(true);  delay(100);
+            leds.setBlue(false); delay(100);
+        }
+        leds.setAll(false, false, true);
+        Serial.println(F("=== Master Ready ==="));
     }
-    leds.setAll(false, false, true);
-    Serial.println(F("=== Master Ready ==="));
+
+    ota.checkOnBoot(false, apStarted);
 }
 
 void ApMasterMode::loop() {
@@ -40,7 +43,9 @@ void ApMasterMode::loop() {
     sensors.loop();
     udp.loopMaster();
 
-    if (ctx.pairing.active()) {
+    if (ota.isPending()) {
+        leds.setRed((millis() / 200) % 2 == 0);
+    } else if (ctx.pairing.active()) {
         leds.setRed((millis() / 500) % 2 == 0);
     }
 

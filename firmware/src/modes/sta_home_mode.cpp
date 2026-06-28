@@ -6,6 +6,7 @@
 #include "hw/sensor_service.h"
 #include "hw/led_manager.h"
 #include "config/config_store.h"
+#include "ota/ota_manager.h"
 
 void StaHomeMode::onEnter() {
     Serial.println(F("[STA_HOME] onEnter"));
@@ -29,6 +30,7 @@ void StaHomeMode::onEnter() {
     }
 
     Serial.println(F("=== STA Home Ready ==="));
+    ota.checkOnBoot(true, false);
 }
 
 void StaHomeMode::loop() {
@@ -37,4 +39,7 @@ void StaHomeMode::loop() {
     mqtt.loop();
     network.maintain();
     ir.pollCapture();
+    if (ota.isPending()) {
+        leds.setRed((millis() / 200) % 2 == 0);
+    }
 }

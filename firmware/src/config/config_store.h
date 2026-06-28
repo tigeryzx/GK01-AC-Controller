@@ -43,6 +43,8 @@ public:
     void scheduleSave();
     bool saveIfDue();
 
+    bool isMounted() const { return mounted_; }
+
     void factoryResetWipe();
 
 private:

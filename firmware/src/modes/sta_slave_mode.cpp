@@ -4,6 +4,7 @@
 #include "hw/ir_service.h"
 #include "hw/led_manager.h"
 #include "config/config_store.h"
+#include "ota/ota_manager.h"
 
 void StaSlaveMode::onEnter() {
     Serial.println(F("[STA_SLAVE] onEnter"));
@@ -26,8 +27,12 @@ void StaSlaveMode::onEnter() {
     udp.sendTo(IPAddress(10, 1, 1, 1), hello.c_str());
 
     Serial.println(F("=== Slave Ready ==="));
+    ota.checkOnBoot(true, false);
 }
 
 void StaSlaveMode::loop() {
     udp.loopSlave();
+    if (ota.isPending()) {
+        leds.setRed((millis() / 200) % 2 == 0);
+    }
 }

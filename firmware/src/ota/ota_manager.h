@@ -18,6 +18,8 @@ public:
 
     bool rollbackIfPending(const char* reason);
 
+    void checkOnBoot(bool wifiConnected, bool apStarted);
+
     void onUploadStart();
     bool onUploadChunk(const uint8_t* data, size_t len);
     void onUploadEnd();
