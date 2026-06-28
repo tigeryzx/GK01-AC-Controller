@@ -167,6 +167,32 @@ select{background:var(--card);color:var(--text)}
 .grid-b{background:var(--card);border-color:var(--gray4)}
 .b-gy{background:var(--gray5)}
 }
+.pg{animation:pgIn .22s cubic-bezier(.4,0,.2,1)}
+@keyframes pgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.cd{transition:transform .12s}
+.cd:active{transform:scale(.99)}
+.empty{text-align:center;padding:36px 16px;color:var(--gray)}
+.empty .em-ic{font-size:48px;margin-bottom:10px;opacity:.4}
+.empty p{font-size:14px;margin-bottom:14px;line-height:1.5}
+.prog{height:6px;background:var(--gray5);border-radius:3px;overflow:hidden;margin:8px 0;display:none}
+.prog-bar{height:100%;background:var(--blue);width:0;transition:width .15s;border-radius:3px}
+.prog-bar.err{background:var(--red)}
+.prog-stat{font-size:13px;color:var(--text3);margin-top:4px;text-align:center}
+.theme-btn{position:fixed;top:12px;right:14px;z-index:60;width:30px;height:30px;border-radius:50%;
+border:none;background:rgba(0,0,0,.06);font-size:15px;cursor:pointer;line-height:1;padding:0;
+display:flex;align-items:center;justify-content:center;transition:transform .12s}
+.theme-btn:active{transform:scale(.9)}
+@media(prefers-color-scheme:dark){.theme-btn{background:rgba(255,255,255,.1)}}
+[data-theme=light]{--bg:#f2f2f7;--card:#fff;--blue:#007AFF;--green:#34C759;--red:#FF3B30;
+--orange:#FF9500;--purple:#AF52DE;--teal:#5AC8FA;--pink:#FF2D55;
+--gray:#8e8e93;--gray3:#c7c7cc;--gray4:#d1d1d6;--gray5:#e5e5ea;--gray6:#f2f2f7;
+--text:#1c1c1e;--text2:#3c3c43;--text3:#636366}
+[data-theme=dark]{--bg:#000;--card:#1c1c1e;--blue:#0a84ff;--green:#30d158;--red:#ff453a;
+--orange:#ff9f0a;--purple:#bf5af2;--teal:#64d2ff;--pink:#ff375f;
+--gray:#8e8e93;--gray3:#48484a;--gray4:#3a3a3c;--gray5:#2c2c2e;--gray6:#1c1c1e;
+--text:#fff;--text2:#ebebf5;--text3:#ababaf}
+body{background:var(--bg);color:var(--text)}
+.hdr{background:color-mix(in srgb,var(--card) 88%,transparent);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
 </style>
 </head>
 <body>
@@ -386,6 +412,8 @@ select{background:var(--card);color:var(--text)}
 </div>
 <button type="submit" class="b b-or b-fw" id="ota-btn" disabled>选择 OTA 固件</button>
 </form>
+<div class="prog" id="ota-prog"><div class="prog-bar" id="ota-prog-bar"></div></div>
+<div class="prog-stat" id="ota-prog-stat"></div>
 <div id="ota-msg" class="ota-meta ota-wait"></div>
 </div></div></div>
 <nav class="bar">
@@ -985,6 +1013,54 @@ function disconnectDev(){
   fetch('/api/slave/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+editDevId+'&cmd=disconnect'})
   .then(function(r){return r.json()}).then(function(d){toast(d.ok?'断开指令已发送':'失败');closeRename()});
 }
+(function(){
+  var saved=localStorage.getItem('ir_theme');
+  if(saved)document.documentElement.setAttribute('data-theme',saved);
+  var b=document.createElement('button');
+  b.className='theme-btn';b.innerHTML='\u25D1';b.title='\u5207\u6362\u4e3b\u9898';
+  b.onclick=function(){
+    var cur=document.documentElement.getAttribute('data-theme');
+    var dark=cur==='dark'||(!cur&&matchMedia('(prefers-color-scheme:dark)').matches);
+    var next=dark?'light':'dark';
+    document.documentElement.setAttribute('data-theme',next);
+    localStorage.setItem('ir_theme',next);
+  };
+  document.body.appendChild(b);
+})();
+(function(){
+  var f=document.getElementById('ota-form');if(!f)return;
+  f.addEventListener('submit',function(e){
+    e.preventDefault();
+    var fi=document.getElementById('ota-file');
+    if(!fi||!fi.files[0])return;
+    var file=fi.files[0];
+    var prog=document.getElementById('ota-prog'),bar=document.getElementById('ota-prog-bar');
+    var stat=document.getElementById('ota-prog-stat'),btn=document.getElementById('ota-btn');
+    btn.disabled=true;btn.textContent='\u4e0a\u4f20\u4e2d...';
+    prog.style.display='block';bar.style.width='0';bar.className='prog-bar';stat.textContent='\u4e0a\u4f20\u4e2d 0%';
+    var xhr=new XMLHttpRequest();
+    xhr.upload.onprogress=function(ev){if(ev.lengthComputable){
+      var pct=Math.round(ev.loaded/ev.total*100);
+      bar.style.width=pct+'%';stat.textContent='\u4e0a\u4f20\u4e2d '+pct+'%';
+    }};
+    xhr.onload=function(){
+      if(xhr.status===200){
+        stat.textContent='\u4e0a\u4f20\u5b8c\u6210\uff0c\u8bbe\u5907\u91cd\u542f\u4e2d...';
+        bar.style.width='100%';setTimeout(function(){location.reload()},10000);
+      }else{
+        bar.className='prog-bar err';
+        stat.textContent='\u5931\u8d25: '+(xhr.responseText||'\u672a\u77e5\u9519\u8bef').substring(0,80);
+        btn.disabled=false;btn.textContent='\u9009\u62e9 OTA \u56fa\u4ef6';
+      }
+    };
+    xhr.onerror=function(){
+      bar.className='prog-bar err';stat.textContent='\u7f51\u7edc\u9519\u8bef';
+      btn.disabled=false;btn.textContent='\u9009\u62e9 OTA \u56fa\u4ef6';
+    };
+    var fd=new FormData();fd.append('firmware',file);
+    xhr.open('POST','/update');xhr.send(fd);
+  });
+})();
 </script>
 </body></html>)rawliteral";
 #endif
