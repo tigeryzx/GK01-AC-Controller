@@ -65,16 +65,17 @@
 
 ```bash
 cd firmware
-pio run -e rom0
+pio run -e rom0 -e rom1
 ```
+
+日常编译**只需 rom0 + rom1**（rboot 双分区，支持 WebUI OTA）。`factory` / `diag` / `diag_factory` 环境仅用于硬件诊断和救砖，日常使用不需要编译。
 
 PlatformIO 原始产物在 `.pio/build/rom0/firmware.bin`，不要直接拿它做 rboot 首刷或 Web OTA。发布/刷写前先生成 rboot 镜像：
 
 ```bash
-pio run -e rom0
-pio run -e rom1
+pio run -e rom0 -e rom1
 python prepare_flash.py both
-python ../scripts/make_combined.py
+python ..\scripts\make_combined.py
 ```
 
 也可以从 [GitHub Releases](https://github.com/Timeink88/GK01-AC-Controller/releases) 下载预编译固件。首次刷写优先下载 `combined-vX.X.bin`。
