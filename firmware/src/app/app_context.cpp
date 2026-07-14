@@ -20,7 +20,7 @@ void AppContext::begin() {
     Serial.printf("[CTX] chipId=%s mac=%s slaveId=%s\n",
                   chipId_.c_str(), mac_.c_str(), slaveId_.c_str());
 
-    configStore.begin(false);
+    configStore.begin(true);
     configStore.load();
     slaves.load();
     hvacState.loadFrom(configStore.cfg);

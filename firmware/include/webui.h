@@ -794,6 +794,7 @@ function loadMqttConfig(){
     if(d.host)$('mqtt-host').value=d.host;
     if(d.port)$('mqtt-port').value=d.port;
     if(d.user)$('mqtt-user').value=d.user;
+    if(d.pass)$('mqtt-pass').value=d.pass;
     if(d.topic)$('mqtt-topic').value=d.topic;
   }).catch(function(){});
 }

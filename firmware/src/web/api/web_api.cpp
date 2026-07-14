@@ -137,7 +137,7 @@ static void handleWifiConnect() {
     str::copyTo(configStore.cfg.sta_pass, sizeof(configStore.cfg.sta_pass), pass);
     configStore.save();
     S().send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
-    delay(500);
+    delay(2000);
     ESP.restart();
 }
 
@@ -207,6 +207,7 @@ static void handleMqttConfig() {
         String json = "{\"host\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_host)) +
                       "\",\"port\":" + String(configStore.cfg.mqtt_port) +
                       ",\"user\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_user)) +
+                      "\",\"pass\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_pass)) +
                       "\",\"topic\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_topic)) + "\"}";
         S().send(200, "application/json", json);
         return;

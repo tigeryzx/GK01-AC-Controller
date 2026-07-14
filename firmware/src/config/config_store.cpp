@@ -15,6 +15,16 @@ bool ensureFSMounted(bool formatIfNeeded) {
     if (fsMounted) return true;
 
     fsMounted = LittleFS.begin();
+    if (fsMounted && formatIfNeeded && !LittleFS.exists(FS_CONFIG_TXT)) {
+        Serial.println(F("[FS] no config.txt, formatting..."));
+        LittleFS.end();
+        LittleFS.format();
+        fsMounted = LittleFS.begin();
+        if (!fsMounted) {
+            Serial.println(F("[FS] mount failed after format"));
+        }
+        return fsMounted;
+    }
     if (fsMounted) return true;
     if (!formatIfNeeded) return false;
 
@@ -104,14 +114,17 @@ bool ConfigStore::load() {
 }
 
 bool ConfigStore::save() {
+    Serial.println(F("[CFG-DBG] save() called"));
     if (!ensureFSMounted(true)) {
         Serial.println(F("[CFG] skipped save: LittleFS unavailable"));
         return false;
     }
+    String tmpPath = String(FS_CONFIG_TXT) + ".tmp";
+    Serial.printf("[CFG-DBG] filesystem mounted, opening %s...\n", tmpPath.c_str());
 
-    File f = LittleFS.open("/config.tmp", "w");
+    File f = LittleFS.open(tmpPath.c_str(), "w");
     if (!f) {
-        Serial.println(F("[CFG] write failed"));
+        Serial.println(F("[CFG] write failed: cannot open config.tmp"));
         return false;
     }
     f.printf("ap_ssid=%s\n",             cfg.ap_ssid);
@@ -135,10 +148,13 @@ bool ConfigStore::save() {
     f.printf("device_floor=%s\n",        cfg.device_floor);
     f.close();
 
-    if (!writeAtomic(FS_CONFIG_TXT, FS_CONFIG_BAK)) return false;
+    if (!writeAtomic(FS_CONFIG_TXT, FS_CONFIG_BAK)) {
+        Serial.println(F("[CFG] save failed: writeAtomic error"));
+        return false;
+    }
     savePending_ = false;
     saveDueAt_   = 0;
-    Serial.println(F("[CFG] saved"));
+    Serial.println(F("[CFG] saved OK"));
     return true;
 }
 

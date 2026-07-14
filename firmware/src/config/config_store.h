@@ -16,8 +16,8 @@ struct Config {
     char     sta_pass[64] = "";
     char     mqtt_host[64] = "";
     uint16_t mqtt_port = 1883;
-    char     mqtt_user[32] = "";
-    char     mqtt_pass[32] = "";
+    char     mqtt_user[64] = "";
+    char     mqtt_pass[64] = "";
     char     mqtt_topic[32] = "ir_ac";
     uint8_t  force_mode = FORCE_MODE_AUTO;
     char     paired_master_bssid[18] = "";

@@ -78,13 +78,23 @@ bool MqttService::connect() {
 
     mqtt_.setServer(configStore.cfg.mqtt_host, configStore.cfg.mqtt_port);
 
-    String clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
+    String clientId;
     bool ok;
-    if (strlen(configStore.cfg.mqtt_user) > 0) {
+    if (strlen(configStore.cfg.mqtt_user) > 0 && strlen(configStore.cfg.mqtt_pass) > 0) {
+        clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
+        Serial.printf("[MQTT] Mode: standard, user=%s, clientId=%s\n",
+                      configStore.cfg.mqtt_user, clientId.c_str());
         ok = mqtt_.connect(clientId.c_str(),
                            configStore.cfg.mqtt_user,
                            configStore.cfg.mqtt_pass);
+    } else if (strlen(configStore.cfg.mqtt_pass) > 0) {
+        clientId = String(configStore.cfg.mqtt_pass);
+        Serial.printf("[MQTT] Mode: token-as-clientId, passLen=%d\n",
+                      strlen(configStore.cfg.mqtt_pass));
+        ok = mqtt_.connect(clientId.c_str());
     } else {
+        clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
+        Serial.printf("[MQTT] Mode: anonymous, clientId=%s\n", clientId.c_str());
         ok = mqtt_.connect(clientId.c_str());
     }
 
