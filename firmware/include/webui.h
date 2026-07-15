@@ -353,12 +353,20 @@ body{background:var(--bg);color:var(--text)}
 <button class="b b-bl b-fw" onclick="saveApConfig()">保存热点配置并重启</button>
 </div></div>
 <div class="cd"><div class="cd-h">MQTT</div><div class="cd-b">
+<div style="margin-bottom:8px">
+<select id="mqtt-type" onchange="onMqttTypeChange()">
+<option value="0">自动推断</option>
+<option value="1">标准 MQTT（HA）</option>
+<option value="2">巴法云（米家）</option>
+<option value="3">匿名</option>
+</select>
+</div>
 <input type="text" id="mqtt-host" placeholder="服务器地址（如 192.168.1.100）" style="margin-bottom:8px">
 <div style="display:flex;gap:8px;margin-bottom:8px">
 <input type="text" id="mqtt-port" placeholder="端口" value="1883" style="flex:1">
-<input type="text" id="mqtt-user" placeholder="用户名（可选）" style="flex:1">
+<div id="mqtt-user-wrap" style="flex:1"><input type="text" id="mqtt-user" placeholder="用户名（可选）" style="width:100%"></div>
 </div>
-<input type="text" id="mqtt-pass" placeholder="密码（可选）" style="margin-bottom:8px">
+<div id="mqtt-pass-wrap"><input type="text" id="mqtt-pass" placeholder="密码（可选）" style="margin-bottom:8px"></div>
 <input type="text" id="mqtt-topic" placeholder="Topic 前缀" value="ir_ac" style="margin-bottom:10px">
 <button class="b b-pp b-fw" onclick="saveMqtt()">保存MQTT配置并重启</button>
 </div></div>
@@ -789,24 +797,50 @@ function forgetWifi(){
   if(!confirm('确定忘记网络？设备将重启为AP模式'))return;
   fetch('/api/wifi/forget',{method:'POST'}).then(function(){toast('重启中...')});
 }
+function onMqttTypeChange(){
+  var t=$('mqtt-type').value;
+  var uw=$('mqtt-user-wrap'),pw=$('mqtt-pass-wrap');
+  var h=$('mqtt-host'),p=$('mqtt-port'),u=$('mqtt-user'),pw2=$('mqtt-pass'),tp=$('mqtt-topic');
+  if(t==='2'){
+    uw.style.display='none';pw.style.display='';
+    h.placeholder='巴法云 MQTT 服务器';h.value='mqtt.bemfa.com';
+    p.value='9501';p.placeholder='端口';
+    pw2.placeholder='私钥';pw2.type='text';
+    tp.placeholder='主题名（须以005结尾）';
+  } else if(t==='3'){
+    uw.style.display='none';pw.style.display='none';
+    h.placeholder='服务器地址';pw2.placeholder='密码';
+    tp.placeholder='Topic 前缀';
+  } else {
+    uw.style.display='';pw.style.display='';
+    h.placeholder='服务器地址（如 192.168.1.100）';
+    pw2.placeholder='密码（可选）';pw2.type='text';
+    tp.placeholder='Topic 前缀';
+  }
+}
 function loadMqttConfig(){
   fetch('/api/mqtt/config').then(function(r){return r.json()}).then(function(d){
+    if(d.type!==undefined)$('mqtt-type').value=d.type;
     if(d.host)$('mqtt-host').value=d.host;
     if(d.port)$('mqtt-port').value=d.port;
     if(d.user)$('mqtt-user').value=d.user;
     if(d.pass)$('mqtt-pass').value=d.pass;
     if(d.topic)$('mqtt-topic').value=d.topic;
+    onMqttTypeChange();
   }).catch(function(){});
 }
 loadMqttConfig();
 function saveMqtt(){
   var host=$('mqtt-host').value.trim();if(!host){toast('请输入MQTT服务器地址');return}
+  var tp=$('mqtt-topic').value.trim();
+  var tpEl=$('mqtt-topic');
+  if($('mqtt-type').value==='2'&&tp&&!tp.endsWith('005')){toast('主题名必须以005结尾');tpEl.focus();return}
   toast('保存中...');
   fetch('/api/mqtt/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'host='+encodeURIComponent(host)+'&port='+$('mqtt-port').value
+    body:'type='+$('mqtt-type').value+'&host='+encodeURIComponent(host)+'&port='+$('mqtt-port').value
     +'&user='+encodeURIComponent($('mqtt-user').value)
     +'&pass='+encodeURIComponent($('mqtt-pass').value)
-    +'&topic='+encodeURIComponent($('mqtt-topic').value)})
+    +'&topic='+encodeURIComponent(tp)})
   .then(function(r){return r.json()}).then(function(d){toast(d.ok?'重启中...':'失败')});
 }
 function loadApConfig(){

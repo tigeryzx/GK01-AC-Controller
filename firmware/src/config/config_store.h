@@ -19,6 +19,7 @@ struct Config {
     char     mqtt_user[64] = "";
     char     mqtt_pass[64] = "";
     char     mqtt_topic[32] = "ir_ac";
+    uint8_t  mqtt_type = 0;   // 0=auto 1=standardMQTT(HA) 2=bemfa(米家) 3=anonymous
     uint8_t  force_mode = FORCE_MODE_AUTO;
     char     paired_master_bssid[18] = "";
     char     last_vendor[16] = "GREE";

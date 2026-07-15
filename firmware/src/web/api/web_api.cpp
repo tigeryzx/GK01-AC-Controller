@@ -208,9 +208,18 @@ static void handleMqttConfig() {
                       "\",\"port\":" + String(configStore.cfg.mqtt_port) +
                       ",\"user\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_user)) +
                       "\",\"pass\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_pass)) +
-                      "\",\"topic\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_topic)) + "\"}";
+                      "\",\"topic\":\"" + str::jsonEscape(String(configStore.cfg.mqtt_topic)) +
+                      "\",\"type\":" + String(configStore.cfg.mqtt_type) + "}";
         S().send(200, "application/json", json);
         return;
+    }
+    if (S().hasArg("type")) {
+        int t = S().arg("type").toInt();
+        if (t < 0 || t > 3) {
+            S().send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_type\"}");
+            return;
+        }
+        configStore.cfg.mqtt_type = (uint8_t)t;
     }
     String host = str::sanitizeConfigValue(S().arg("host"), sizeof(configStore.cfg.mqtt_host) - 1);
     str::copyTo(configStore.cfg.mqtt_host, sizeof(configStore.cfg.mqtt_host), host);
@@ -231,6 +240,13 @@ static void handleMqttConfig() {
     }
     String topic = str::sanitizeConfigValue(S().arg("topic"), sizeof(configStore.cfg.mqtt_topic) - 1);
     if (topic.length() > 0) str::copyTo(configStore.cfg.mqtt_topic, sizeof(configStore.cfg.mqtt_topic), topic);
+    if (configStore.cfg.mqtt_type == 2) {
+        String t = String(configStore.cfg.mqtt_topic);
+        if (!t.endsWith("005")) {
+            S().send(400, "application/json", "{\"ok\":false,\"error\":\"topic_must_end_with_005\"}");
+            return;
+        }
+    }
     configStore.save();
     S().send(200, "application/json", "{\"ok\":true,\"msg\":\"rebooting\"}");
     delay(500);

@@ -94,6 +94,7 @@ bool ConfigStore::load() {
         else if (key == "mqtt_user")           copyTo(cfg.mqtt_user, sizeof(cfg.mqtt_user), sanitizeConfigValue(val, sizeof(cfg.mqtt_user) - 1));
         else if (key == "mqtt_pass")           copyTo(cfg.mqtt_pass, sizeof(cfg.mqtt_pass), sanitizeConfigValue(val, sizeof(cfg.mqtt_pass) - 1));
         else if (key == "mqtt_topic")          copyTo(cfg.mqtt_topic, sizeof(cfg.mqtt_topic), sanitizeConfigValue(val, sizeof(cfg.mqtt_topic) - 1));
+        else if (key == "mqtt_type")          cfg.mqtt_type = (uint8_t)val.toInt();
         else if (key == "force_mode")          cfg.force_mode = (uint8_t)val.toInt();
         else if (key == "paired_master_bssid") copyTo(cfg.paired_master_bssid, sizeof(cfg.paired_master_bssid), sanitizeConfigValue(val, sizeof(cfg.paired_master_bssid) - 1));
         else if (key == "last_vendor")         copyTo(cfg.last_vendor, sizeof(cfg.last_vendor), sanitizeConfigValue(val, sizeof(cfg.last_vendor) - 1));
@@ -108,6 +109,7 @@ bool ConfigStore::load() {
     f.close();
 
     if (cfg.force_mode > FORCE_MODE_HOME) cfg.force_mode = FORCE_MODE_AUTO;
+    if (cfg.mqtt_type > 3) cfg.mqtt_type = 0;
     if (cfg.mqtt_port == 0) cfg.mqtt_port = MQTT_DEFAULT_PORT;
     cfg.last_temp = constrain(cfg.last_temp, HVAC_MIN_TEMP_DEFAULT, HVAC_MAX_TEMP_DEFAULT);
     return strlen(cfg.sta_ssid) > 0;
@@ -136,6 +138,7 @@ bool ConfigStore::save() {
     f.printf("mqtt_user=%s\n",           cfg.mqtt_user);
     f.printf("mqtt_pass=%s\n",           cfg.mqtt_pass);
     f.printf("mqtt_topic=%s\n",          cfg.mqtt_topic);
+    f.printf("mqtt_type=%d\n",           cfg.mqtt_type);
     f.printf("force_mode=%d\n",          cfg.force_mode);
     f.printf("paired_master_bssid=%s\n", cfg.paired_master_bssid);
     f.printf("last_vendor=%s\n",         cfg.last_vendor);

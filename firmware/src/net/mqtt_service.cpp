@@ -9,9 +9,15 @@ MqttService mqtt;
 
 namespace {
 MqttService* self = nullptr;
+bool skipRetained_ = false;
 
 void onMessage(char* topic, byte* payload, unsigned int length) {
     if (!self) return;
+    if (skipRetained_) {
+        skipRetained_ = false;
+        Serial.println(F("[MQTT] Skip retained message"));
+        return;
+    }
     char pbuf[256];
     unsigned int copyLen = (length < sizeof(pbuf) - 1) ? length : sizeof(pbuf) - 1;
     memcpy(pbuf, payload, copyLen);
@@ -34,7 +40,48 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
     bool ok = false;
     bool sendCmd = true;
 
-    if (t == base + "/mode/set") {
+    if (t == base && configStore.cfg.mqtt_type == 2) {
+        int parts[6] = {0, 0, 26, 0, 0, 0};
+        int pi = 0, start = 0;
+        for (int i = 0; i <= (int)p.length(); i++) {
+            if (i == (int)p.length() || p[i] == '#') {
+                if (pi < 6) parts[pi++] = p.substring(start, i).toInt();
+                start = i + 1;
+            }
+        }
+        String powerStr = p.substring(0, p.indexOf('#'));
+        if (powerStr == "off") {
+            c.power = false; c.mode = "Cool"; c.temp = ctx.hvacState.temp; c.fan = "Auto";
+            ok = hvacRegistry.send(c);
+        } else if (powerStr == "on" || parts[0] == 1) {
+            c.power = true;
+            if (pi > 1) {
+                switch (parts[1]) {
+                    case 1: c.mode = "Auto"; break;
+                    case 2: c.mode = "Cool"; break;
+                    case 3: c.mode = "Heat"; break;
+                    case 4: c.mode = "Fan"; break;
+                    case 5: c.mode = "Dry"; break;
+                    default: c.mode = "Auto"; break;
+                }
+            }
+            if (pi > 2 && parts[2] >= 16 && parts[2] <= 32) c.temp = parts[2];
+            if (pi > 3) {
+                switch (parts[3]) {
+                    case 0: c.fan = "Auto"; break;
+                    case 1: c.fan = "Low"; break;
+                    case 2: c.fan = "Medium"; break;
+                    case 3: c.fan = "Medium"; break;
+                    case 4: c.fan = "High"; break;
+                    case 5: c.fan = "High"; break;
+                    default: c.fan = "Auto"; break;
+                }
+            }
+            ok = hvacRegistry.send(c);
+        } else {
+            sendCmd = false;
+        }
+    } else if (t == base + "/mode/set") {
         if      (p == "off")      { c.power = false; ok = hvacRegistry.send(c); }
         else if (p == "cool")     { c.power = true; c.mode = "Cool"; ok = hvacRegistry.send(c); }
         else if (p == "heat")     { c.power = true; c.mode = "Heat"; ok = hvacRegistry.send(c); }
@@ -80,22 +127,42 @@ bool MqttService::connect() {
 
     String clientId;
     bool ok;
-    if (strlen(configStore.cfg.mqtt_user) > 0 && strlen(configStore.cfg.mqtt_pass) > 0) {
+    uint8_t mt = configStore.cfg.mqtt_type;
+
+    if (mt == 1) {
         clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
         Serial.printf("[MQTT] Mode: standard, user=%s, clientId=%s\n",
                       configStore.cfg.mqtt_user, clientId.c_str());
         ok = mqtt_.connect(clientId.c_str(),
                            configStore.cfg.mqtt_user,
                            configStore.cfg.mqtt_pass);
-    } else if (strlen(configStore.cfg.mqtt_pass) > 0) {
+    } else if (mt == 2) {
         clientId = String(configStore.cfg.mqtt_pass);
-        Serial.printf("[MQTT] Mode: token-as-clientId, passLen=%d\n",
+        Serial.printf("[MQTT] Mode: bemfa, clientId len=%d\n",
                       strlen(configStore.cfg.mqtt_pass));
         ok = mqtt_.connect(clientId.c_str());
-    } else {
+    } else if (mt == 3) {
         clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
         Serial.printf("[MQTT] Mode: anonymous, clientId=%s\n", clientId.c_str());
         ok = mqtt_.connect(clientId.c_str());
+    } else {
+        if (strlen(configStore.cfg.mqtt_user) > 0 && strlen(configStore.cfg.mqtt_pass) > 0) {
+            clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
+            Serial.printf("[MQTT] Mode: standard(auto), user=%s, clientId=%s\n",
+                          configStore.cfg.mqtt_user, clientId.c_str());
+            ok = mqtt_.connect(clientId.c_str(),
+                               configStore.cfg.mqtt_user,
+                               configStore.cfg.mqtt_pass);
+        } else if (strlen(configStore.cfg.mqtt_pass) > 0) {
+            clientId = String(configStore.cfg.mqtt_pass);
+            Serial.printf("[MQTT] Mode: token-as-clientId(auto), passLen=%d\n",
+                          strlen(configStore.cfg.mqtt_pass));
+            ok = mqtt_.connect(clientId.c_str());
+        } else {
+            clientId = String("IR-AC-") + String(ESP.getChipId(), HEX);
+            Serial.printf("[MQTT] Mode: anonymous(auto), clientId=%s\n", clientId.c_str());
+            ok = mqtt_.connect(clientId.c_str());
+        }
     }
 
     if (ok) {
@@ -103,7 +170,13 @@ bool MqttService::connect() {
         mqtt_.subscribe((topicBase_ + "/mode/set").c_str());
         mqtt_.subscribe((topicBase_ + "/temperature/set").c_str());
         mqtt_.subscribe((topicBase_ + "/fan/set").c_str());
-        publishDiscovery();
+        if (mt == 2) {
+            mqtt_.subscribe(topicBase_.c_str());
+        }
+        skipRetained_ = true;
+        if (mt != 2) {
+            publishDiscovery();
+        }
         publishState();
         return true;
     }
@@ -128,6 +201,29 @@ void MqttService::loop() {
 
 void MqttService::publishState() {
     if (!mqtt_.connected()) return;
+    if (configStore.cfg.mqtt_type == 2) return;
+
+    if (configStore.cfg.mqtt_type == 2) {
+        String power = ctx.hvacState.power ? "on" : "off";
+        int modeVal = 1;
+        if      (ctx.hvacState.mode == "Cool") modeVal = 2;
+        else if (ctx.hvacState.mode == "Heat") modeVal = 3;
+        else if (ctx.hvacState.mode == "Fan")  modeVal = 4;
+        else if (ctx.hvacState.mode == "Dry")  modeVal = 5;
+        else                                   modeVal = 1;
+        int fanVal = 0;
+        String fanLower = ctx.hvacState.fan; fanLower.toLowerCase();
+        if      (fanLower == "low")    fanVal = 1;
+        else if (fanLower == "medium") fanVal = 2;
+        else if (fanLower == "high")   fanVal = 4;
+        else                           fanVal = 0;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s#%d#%d#%d#0#0",
+                 power.c_str(), modeVal, ctx.hvacState.temp, fanVal);
+        mqtt_.publish(topicBase_.c_str(), buf, true);
+        return;
+    }
+
     mqtt_.publish((topicBase_ + "/state").c_str(),
                   ctx.hvacState.power ? "on" : "off", true);
 
@@ -138,8 +234,8 @@ void MqttService::publishState() {
     snprintf(tmp, sizeof(tmp), "%d", ctx.hvacState.temp);
     mqtt_.publish((topicBase_ + "/temperature_state").c_str(), tmp, true);
 
-    String fanLower = ctx.hvacState.fan; fanLower.toLowerCase();
-    mqtt_.publish((topicBase_ + "/fan_state").c_str(), fanLower.c_str(), true);
+    String fanLower2 = ctx.hvacState.fan; fanLower2.toLowerCase();
+    mqtt_.publish((topicBase_ + "/fan_state").c_str(), fanLower2.c_str(), true);
 
     if (sensors.present() && sensors.temperatureC() > SENSOR_TEMP_INVALID) {
         snprintf(tmp, sizeof(tmp), "%.1f", sensors.temperatureC());
